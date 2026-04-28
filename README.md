@@ -27,8 +27,10 @@ The Cloudflare Worker portal and GitHub write-broker slice are implemented, merg
 The Worker route is a constrained GitHub workbench broker. The default target remains `fol2/ks2-mastery`; callers can select `fol2/gptpro-gh-workbench` with `repo=fol2/gptpro-gh-workbench` for read endpoints or `"repo": "fol2/gptpro-gh-workbench"` in write JSON bodies.
 
 - ChatGPT Pro should use the hosted API connector/action path described in `docs/chatgpt-workbench-action.md`. The first action call is `GET /api/action/readiness`, authenticated with `X-Workbench-Session`, and ChatGPT must stop unless the response returns `classification: "broker_read_ready"`.
+- If ChatGPT cannot store or send a hidden session header, an authenticated operator can create a short-lived one-time passcode with `POST /api/action/passcodes`; ChatGPT exchanges it once at `POST /api/action/exchange` and then carries the returned `actionSession` in JSON bodies.
 - `GET /` renders a compact browser dashboard.
 - `GET /api/action/readiness` runs the action read gate across status, actions, repository, and auth checks.
+- `POST /api/action/readiness`, `POST /api/action/status`, `POST /api/action/actions`, `POST /api/action/github/repo`, `POST /api/action/github/auth`, `POST /api/action/github/prs`, and `POST /api/action/github/issues` expose the same read operations for body-carried `actionSession` clients.
 - `GET /api/status` reports service, repository, capability, executor, auth/write, and allowlisted endpoint status.
 - `GET /api/github/auth` reports token-backed identity, selected target repository permission, and broker capabilities without returning the token.
 - `GET /api/github/repo` reads metadata for an allowlisted repository through GitHub's REST API.
@@ -122,6 +124,8 @@ npm run deploy
 
 The Worker requires `WORKBENCH_SESSION_TOKEN` as a secret. Open the portal with either a short-lived `?session=...` link or a `gptpro_workbench_session` cookie matching that secret. Hosted API action calls should send the same session capability with `X-Workbench-Session` so the signed session is not placed in action URLs.
 
+The one-time passcode fallback requires a Cloudflare KV binding named `WORKBENCH_ACTION_KV`. Without that binding, passcode and `actionSession` endpoints return `action_store_missing`.
+
 GitHub write endpoints require `GH_TOKEN` as a Worker secret. The token must not be committed, sent to the browser, placed in a Git remote URL, or included in API responses.
 
 Set `WORKBENCH_DEPLOYMENT_STATUS` to the current deploy state, either as a Worker variable or secret. Leave it unset before deployment; after a successful deploy and live smoke, set it to a concrete value such as `worker route live-smoked on 2026-04-28`.
@@ -134,6 +138,7 @@ Set `WORKBENCH_DEPLOYMENT_STATUS` to the current deploy state, either as a Worke
 - No GitHub token, write credential, or executor credential is accepted from callers, echoed, or returned by the Worker.
 - A valid workbench session token is required before the dashboard or API endpoints return data.
 - Hosted API action calls should authenticate with `X-Workbench-Session`; query-string sessions are retained for manual browser/debug use.
+- If hidden headers are unavailable, use a one-time passcode exchange and send `actionSession` in JSON bodies. Passcodes are single-use; action sessions are short-lived, request-limited, repository-bound, and scope-bound.
 - The GitHub API base is fixed to allowlisted repositories only: `fol2/ks2-mastery` and `fol2/gptpro-gh-workbench`.
 - Write endpoints reject direct `main` file writes, non-`agent/...` branches, workflow file edits, path traversal, oversized bodies, and non-JSON requests.
 - Cleanup endpoints are limited to closing pull requests by number and deleting validated `agent/...` branch refs; they do not expose generic Git reference management.

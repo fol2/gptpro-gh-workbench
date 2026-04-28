@@ -21,7 +21,9 @@ const SECRET_PATTERNS = [
   /"X-Workbench-Session"\s*:\s*"(?!<)[^"]{8,}"/i,
   /github_pat_[A-Za-z0-9_]+/i,
   /Bearer\s+[A-Za-z0-9._~+/=-]{12,}/,
-  /ghp_[A-Za-z0-9_]{16,}/i
+  /ghp_[A-Za-z0-9_]{16,}/i,
+  /WB-[0-9A-F]{4}-[0-9A-F]{4}-[0-9A-F]{4}-[0-9A-F]{4}/,
+  /as_[0-9a-f]{32,}/
 ];
 
 async function readDocs() {
@@ -69,6 +71,9 @@ test("action documentation defines the ChatGPT Pro API connector path", async ()
   assert.match(actionDoc, /ChatGPT Pro API connector\/action path/i);
   assert.match(actionDoc, /GET \/api\/action\/readiness/);
   assert.match(actionDoc, /X-Workbench-Session: <signed-session-token>/);
+  assert.match(actionDoc, /POST \/api\/action\/exchange/);
+  assert.match(actionDoc, /actionSession/);
+  assert.match(actionDoc, /one-time passcode/i);
   assert.match(actionDoc, /does not install packages/i);
   assert.match(actionDoc, /must stop rather than retrying with broader authority/i);
   assert.doesNotMatch(actionDoc, /MCP/i);

@@ -11,6 +11,32 @@ const WRITE_ENV = {
 };
 const SESSION = "?session=test-session";
 
+function createFakeActionStore() {
+  const entries = new Map();
+
+  return {
+    entries,
+    async get(key, type) {
+      const value = entries.get(key) ?? null;
+      return type === "json" && value ? JSON.parse(value) : value;
+    },
+    async put(key, value) {
+      entries.set(key, value);
+    },
+    async delete(key) {
+      entries.delete(key);
+    }
+  };
+}
+
+function actionEnv(overrides = {}) {
+  return {
+    ...WRITE_ENV,
+    WORKBENCH_ACTION_KV: createFakeActionStore(),
+    ...overrides
+  };
+}
+
 function jsonPost(path, body, env = WRITE_ENV) {
   return handleRequest(new Request(`${ORIGIN}${path}${SESSION}`, {
     method: "POST",
@@ -19,6 +45,34 @@ function jsonPost(path, body, env = WRITE_ENV) {
     },
     body: JSON.stringify(body)
   }), env);
+}
+
+function jsonPostWithoutWorkbenchSession(path, body, env = WRITE_ENV) {
+  return handleRequest(new Request(`${ORIGIN}${path}`, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json"
+    },
+    body: JSON.stringify(body)
+  }), env);
+}
+
+async function createPasscode(env, body = {}) {
+  const response = await jsonPost("/api/action/passcodes", body, env);
+  const payload = await response.json();
+
+  assert.equal(response.status, 200);
+  assert.match(payload.passcode, /^WB-[0-9A-F]{4}-[0-9A-F]{4}-[0-9A-F]{4}-[0-9A-F]{4}$/);
+  return payload;
+}
+
+async function exchangePasscode(env, passcode, body = {}) {
+  const response = await jsonPostWithoutWorkbenchSession("/api/action/exchange", { passcode, ...body }, env);
+  const payload = await response.json();
+
+  assert.equal(response.status, 200);
+  assert.match(payload.actionSession, /^as_[0-9a-f]{64}$/);
+  return payload;
 }
 
 async function withMockedFetch(handler, fn) {
@@ -103,6 +157,18 @@ test("actions endpoint reflects GH_TOKEN-backed write capability without exposin
   assert.equal(writeAction.status, "enabled");
   assert.equal(executorAction.status, "disabled");
   assert.doesNotMatch(JSON.stringify(payload), /github_pat_testsecret/);
+});
+
+test("actions endpoint reports action passcode support only when KV is configured", async () => {
+  const noStore = await handleRequest(new Request(`${ORIGIN}/api/actions${SESSION}`), WRITE_ENV);
+  const noStorePayload = await noStore.json();
+  const withStore = await handleRequest(new Request(`${ORIGIN}/api/actions${SESSION}`), actionEnv());
+  const withStorePayload = await withStore.json();
+
+  assert.equal(noStorePayload.actions.find((action) => action.id === "workbench.action.passcode.create").status, "disabled");
+  assert.equal(noStorePayload.actions.find((action) => action.id === "workbench.action.exchange").status, "disabled");
+  assert.equal(withStorePayload.actions.find((action) => action.id === "workbench.action.passcode.create").status, "enabled");
+  assert.equal(withStorePayload.actions.find((action) => action.id === "workbench.action.exchange").status, "enabled");
 });
 
 test("unknown API paths return JSON 404", async () => {
@@ -368,6 +434,150 @@ test("action readiness rejects read-only repository permissions", async () => {
     assert.equal(payload.ok, false);
     assert.equal(payload.classification, "insufficient_repository_permission");
     assert.equal(payload.permission, "READ");
+  });
+});
+
+test("action passcode creation requires normal session and configured KV", async () => {
+  const noSession = await jsonPostWithoutWorkbenchSession("/api/action/passcodes", {}, actionEnv());
+  const noSessionPayload = await noSession.json();
+  const noStore = await jsonPost("/api/action/passcodes", {}, WRITE_ENV);
+  const noStorePayload = await noStore.json();
+  const inconsistentScope = await jsonPost("/api/action/passcodes", { write: false, merge: true }, actionEnv());
+  const inconsistentScopePayload = await inconsistentScope.json();
+
+  assert.equal(noSession.status, 401);
+  assert.equal(noSessionPayload.error, "unauthorised");
+  assert.equal(noStore.status, 503);
+  assert.equal(noStorePayload.error, "action_store_missing");
+  assert.equal(inconsistentScope.status, 400);
+  assert.equal(inconsistentScopePayload.field, "merge");
+});
+
+test("workbench session can create a one-time action passcode without storing it raw", async () => {
+  const env = actionEnv();
+  const payload = await createPasscode(env, {
+    repo: "fol2/gptpro-gh-workbench",
+    ttlSeconds: 120,
+    sessionTtlSeconds: 300,
+    maxRequests: 2,
+    write: true
+  });
+
+  assert.equal(payload.scope.repo, "fol2/gptpro-gh-workbench");
+  assert.equal(payload.scope.read, true);
+  assert.equal(payload.scope.write, true);
+  assert.equal(payload.scope.merge, false);
+  assert.equal(payload.scope.maxRequests, 2);
+  assert.equal(payload.scope.sessionTtlSeconds, 300);
+  assert.doesNotMatch(JSON.stringify(payload), /github_pat_testsecret/);
+  assert.doesNotMatch(JSON.stringify(payload), /test-session/);
+
+  for (const storedValue of env.WORKBENCH_ACTION_KV.entries.values()) {
+    assert.doesNotMatch(storedValue, new RegExp(payload.passcode.replaceAll("-", "\\-")));
+  }
+});
+
+test("action passcode exchange is one-time and returns a short-lived action session", async () => {
+  const env = actionEnv();
+  const passcodePayload = await createPasscode(env, { maxRequests: 3, write: true });
+  const exchangePayload = await exchangePasscode(env, passcodePayload.passcode);
+  const repeated = await jsonPostWithoutWorkbenchSession("/api/action/exchange", {
+    passcode: passcodePayload.passcode
+  }, env);
+  const repeatedPayload = await repeated.json();
+
+  assert.equal(exchangePayload.scope.repo, "fol2/ks2-mastery");
+  assert.equal(exchangePayload.scope.read, true);
+  assert.equal(exchangePayload.scope.write, true);
+  assert.equal(exchangePayload.scope.merge, false);
+  assert.equal(exchangePayload.scope.requestsRemaining, 3);
+  assert.doesNotMatch(JSON.stringify(exchangePayload), new RegExp(passcodePayload.passcode.replaceAll("-", "\\-")));
+  assert.equal(repeated.status, 401);
+  assert.equal(repeatedPayload.error, "invalid_action_passcode");
+});
+
+test("action session can call readiness without header or query session", async () => {
+  const env = actionEnv();
+  const passcodePayload = await createPasscode(env, { maxRequests: 3 });
+  const exchangePayload = await exchangePasscode(env, passcodePayload.passcode);
+
+  await withMockedFetch((url) => {
+    if (url === "https://api.github.com/user") {
+      return Response.json({ login: "fol2", id: 105634418 });
+    }
+
+    assert.equal(url, "https://api.github.com/repos/fol2/ks2-mastery");
+    return Response.json({
+      full_name: "fol2/ks2-mastery",
+      default_branch: "main",
+      permissions: { admin: true, push: true, pull: true }
+    });
+  }, async (calls) => {
+    const response = await jsonPostWithoutWorkbenchSession("/api/action/readiness", {
+      actionSession: exchangePayload.actionSession
+    }, env);
+    const payload = await response.json();
+
+    assert.equal(response.status, 200);
+    assert.equal(payload.classification, "broker_read_ready");
+    assert.equal(payload.target_repo, "fol2/ks2-mastery");
+    assert.equal(calls.length, 3);
+    assert.doesNotMatch(JSON.stringify(payload), new RegExp(exchangePayload.actionSession));
+  });
+});
+
+test("action session can write through fixed GitHub endpoints without workbench session", async () => {
+  const env = actionEnv();
+  const passcodePayload = await createPasscode(env, { maxRequests: 3 });
+  const exchangePayload = await exchangePasscode(env, passcodePayload.passcode);
+
+  await withMockedFetch((url, init) => {
+    assert.equal(url, "https://api.github.com/repos/fol2/ks2-mastery/issues");
+    assert.equal(init.method, "POST");
+    assert.deepEqual(JSON.parse(init.body), {
+      title: "Action issue",
+      body: "Created through actionSession"
+    });
+    return Response.json({ number: 22, html_url: "https://github.com/fol2/ks2-mastery/issues/22" }, { status: 201 });
+  }, async (calls) => {
+    const response = await jsonPostWithoutWorkbenchSession("/api/github/issues", {
+      actionSession: exchangePayload.actionSession,
+      title: "Action issue",
+      body: "Created through actionSession"
+    }, env);
+    const payload = await response.json();
+
+    assert.equal(response.status, 200);
+    assert.equal(payload.number, 22);
+    assert.equal(calls.length, 1);
+  });
+});
+
+test("action session rejects wrong repository and merge without merge scope before GitHub calls", async () => {
+  const env = actionEnv();
+  const passcodePayload = await createPasscode(env, { write: true, merge: false });
+  const exchangePayload = await exchangePasscode(env, passcodePayload.passcode);
+
+  await withMockedFetch(() => {
+    throw new Error("GitHub should not be called for invalid action session scope");
+  }, async () => {
+    const wrongRepo = await jsonPostWithoutWorkbenchSession("/api/github/issues", {
+      actionSession: exchangePayload.actionSession,
+      repo: "fol2/gptpro-gh-workbench",
+      title: "Wrong repo"
+    }, env);
+    const wrongRepoPayload = await wrongRepo.json();
+    const deniedMerge = await jsonPostWithoutWorkbenchSession("/api/github/pulls/merge", {
+      actionSession: exchangePayload.actionSession,
+      number: 494,
+      expectedHeadSha: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+    }, env);
+    const deniedMergePayload = await deniedMerge.json();
+
+    assert.equal(wrongRepo.status, 400);
+    assert.equal(wrongRepoPayload.field, "repo");
+    assert.equal(deniedMerge.status, 403);
+    assert.equal(deniedMergePayload.error, "action_session_scope_denied");
   });
 });
 
