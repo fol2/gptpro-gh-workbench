@@ -83,6 +83,20 @@ To test the same header-auth path that the ChatGPT API action should use:
 python3 docs/ks2_workbench_broker_probe.py --session-auth header --json
 ```
 
+Create a one-time passcode for ChatGPT without hand-writing curl:
+
+```sh
+npm run passcode -- fol2/ks2-mastery
+```
+
+That command reads `~/.config/gptpro-gh-workbench/session-token`, creates a write-capable non-merge action session passcode for the selected repository, and prints only the passcode. Optional flags are available for narrower or explicit scopes:
+
+```sh
+npm run passcode -- fol2/gptpro-gh-workbench --read-only
+npm run passcode -- fol2/ks2-mastery --max-requests 10 --session-ttl-seconds 600
+npm run passcode -- fol2/ks2-mastery --merge
+```
+
 The default probe is read-only. The optional write smoke creates a temporary `agent/...` branch, writes a harmless smoke file, opens a temporary PR, closes that PR, and deletes the branch:
 
 ```sh

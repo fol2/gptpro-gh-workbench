@@ -6,7 +6,8 @@
   "description": "Session-protected Cloudflare Worker portal and narrow GitHub broker for the GPTPro GitHub Workbench.",
   "scripts": {
     "test": "node --test && python3 tests/broker_probe_test.py",
-    "check": "node --check src/worker.js && node --check tests/worker.test.js && node --check tests/workbench_docs.test.js && python3 -m py_compile docs/ks2_workbench_broker_probe.py tests/broker_probe_test.py",
+    "check": "node --check src/worker.js && node --check scripts/create-action-passcode.mjs && node --check tests/worker.test.js && node --check tests/workbench_docs.test.js && node --check tests/create_action_passcode_cli.test.js && python3 -m py_compile docs/ks2_workbench_broker_probe.py tests/broker_probe_test.py",
+    "passcode": "node scripts/create-action-passcode.mjs",
     "dev": "wrangler dev",
     "deploy": "wrangler deploy"
   },
