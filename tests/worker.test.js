@@ -53,6 +53,7 @@ test("status payload declares broker boundaries without GH_TOKEN", async () => {
   assert.equal(payload.auth_write_status.enabled, false);
   assert.deepEqual(payload.allowlisted_read_endpoints, buildStatus().allowlisted_read_endpoints);
   assert.match(payload.allowlisted_write_endpoints.join(" "), /POST \/api\/github\/pulls/);
+  assert.match(payload.allowlisted_write_endpoints.join(" "), /POST \/api\/github\/pulls\/merge/);
 });
 
 test("status reports write broker mode when GH_TOKEN is configured", async () => {
@@ -71,7 +72,7 @@ test("dashboard is browser-readable and states narrow broker scope", async () =>
 
   assert.equal(response.status, 200);
   assert.match(response.headers.get("content-type") ?? "", /text\/html/);
-  assert.match(html, /narrow write endpoints for agent branches only/i);
+  assert.match(html, /narrow write endpoints for agent branches, including guarded agent PR merges/i);
   assert.match(html, /not claimed until deployed and live-smoked/i);
   assert.match(html, /href="\/api\/status\?session=test-session"/);
   assert.match(html, /href="\/api\/github\/auth\?session=test-session"/);
@@ -227,6 +228,8 @@ test("GitHub auth endpoint reports token-backed identity and repository permissi
     assert.equal(payload.github_user.login, "fol2");
     assert.equal(payload.repository.viewer_permission, "ADMIN");
     assert.equal(payload.capabilities.direct_main_write, false);
+    assert.equal(payload.capabilities.merge_agent_pull_request, true);
+    assert.equal(payload.capabilities.merge, "agent_pr_squash_only");
     assert.equal(calls[0].init.headers.Authorization, "Bearer github_pat_testsecret");
     assert.doesNotMatch(JSON.stringify(payload), /github_pat_testsecret/);
   });
@@ -408,6 +411,171 @@ test("cleanup validation rejects unsafe PR numbers and branches before GitHub ca
     assert.equal(mainBranch.status, 400);
     assert.equal(nonAgentBranch.status, 400);
     assert.equal(refsBranch.status, 400);
+  });
+});
+
+test("merge endpoint verifies an agent PR before calling GitHub's merge API", async () => {
+  await withMockedFetch((url, init, calls) => {
+    if (url === "https://api.github.com/repos/fol2/ks2-mastery/pulls/494" && calls.length === 1) {
+      assert.equal(init.method, "GET");
+      return Response.json({
+        number: 494,
+        state: "open",
+        draft: false,
+        html_url: "https://github.com/fol2/ks2-mastery/pull/494",
+        mergeable: true,
+        head: {
+          ref: "agent/merge-ready",
+          sha: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          repo: { full_name: "fol2/ks2-mastery" }
+        },
+        base: {
+          ref: "main",
+          repo: { full_name: "fol2/ks2-mastery" }
+        }
+      });
+    }
+
+    assert.equal(url, "https://api.github.com/repos/fol2/ks2-mastery/pulls/494/merge");
+    assert.equal(init.method, "PUT");
+    assert.deepEqual(JSON.parse(init.body), {
+      merge_method: "squash",
+      commit_title: "Merge broker smoke",
+      commit_message: "Merged by guarded broker.",
+      sha: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+    });
+    return Response.json({
+      sha: "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+      merged: true,
+      message: "Pull Request successfully merged"
+    });
+  }, async (calls) => {
+    const response = await jsonPost("/api/github/pulls/merge", {
+      number: 494,
+      title: "Merge broker smoke",
+      message: "Merged by guarded broker.",
+      expectedHeadSha: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+    });
+    const payload = await response.json();
+
+    assert.equal(response.status, 200);
+    assert.equal(payload.merged, true);
+    assert.equal(payload.number, 494);
+    assert.equal(payload.method, "squash");
+    assert.equal(payload.sha, "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb");
+    assert.deepEqual(payload.head, {
+      ref: "agent/merge-ready",
+      sha: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+    });
+    assert.equal(calls.length, 2);
+  });
+});
+
+test("merge validation rejects unsupported methods before GitHub calls", async () => {
+  await withMockedFetch(() => {
+    throw new Error("GitHub should not be called for invalid merge input");
+  }, async () => {
+    const response = await jsonPost("/api/github/pulls/merge", { number: 494, method: "merge" });
+    const payload = await response.json();
+
+    assert.equal(response.status, 400);
+    assert.equal(payload.field, "method");
+  });
+});
+
+test("merge endpoint rejects non-agent or unsafe pull requests before merging", async () => {
+  const cases = [
+    {
+      body: {
+        state: "closed",
+        draft: false,
+        head: { ref: "agent/closed", repo: { full_name: "fol2/ks2-mastery" } },
+        base: { ref: "main", repo: { full_name: "fol2/ks2-mastery" } }
+      },
+      field: "number"
+    },
+    {
+      body: {
+        state: "open",
+        draft: true,
+        head: { ref: "agent/draft", repo: { full_name: "fol2/ks2-mastery" } },
+        base: { ref: "main", repo: { full_name: "fol2/ks2-mastery" } }
+      },
+      field: "number"
+    },
+    {
+      body: {
+        state: "open",
+        draft: false,
+        head: { ref: "agent/wrong-base", repo: { full_name: "fol2/ks2-mastery" } },
+        base: { ref: "develop", repo: { full_name: "fol2/ks2-mastery" } }
+      },
+      field: "base"
+    },
+    {
+      body: {
+        state: "open",
+        draft: false,
+        head: { ref: "feature/not-agent", repo: { full_name: "fol2/ks2-mastery" } },
+        base: { ref: "main", repo: { full_name: "fol2/ks2-mastery" } }
+      },
+      field: "head"
+    },
+    {
+      body: {
+        state: "open",
+        draft: false,
+        head: { ref: "agent/fork", repo: { full_name: "someone/ks2-mastery" } },
+        base: { ref: "main", repo: { full_name: "fol2/ks2-mastery" } }
+      },
+      field: "head"
+    }
+  ];
+
+  for (const [index, testCase] of cases.entries()) {
+    await withMockedFetch((url, init) => {
+      assert.equal(url, `https://api.github.com/repos/fol2/ks2-mastery/pulls/${500 + index}`);
+      assert.equal(init.method, "GET");
+      return Response.json({ number: 500 + index, ...testCase.body });
+    }, async (calls) => {
+      const response = await jsonPost("/api/github/pulls/merge", { number: 500 + index });
+      const payload = await response.json();
+
+      assert.equal(response.status, 400);
+      assert.equal(payload.field, testCase.field);
+      assert.equal(calls.length, 1);
+    });
+  }
+});
+
+test("merge endpoint rejects stale expected head SHA before merging", async () => {
+  await withMockedFetch((url, init) => {
+    assert.equal(url, "https://api.github.com/repos/fol2/ks2-mastery/pulls/499");
+    assert.equal(init.method, "GET");
+    return Response.json({
+      number: 499,
+      state: "open",
+      draft: false,
+      head: {
+        ref: "agent/stale-head",
+        sha: "cccccccccccccccccccccccccccccccccccccccc",
+        repo: { full_name: "fol2/ks2-mastery" }
+      },
+      base: {
+        ref: "main",
+        repo: { full_name: "fol2/ks2-mastery" }
+      }
+    });
+  }, async (calls) => {
+    const response = await jsonPost("/api/github/pulls/merge", {
+      number: 499,
+      expectedHeadSha: "dddddddddddddddddddddddddddddddddddddddd"
+    });
+    const payload = await response.json();
+
+    assert.equal(response.status, 400);
+    assert.equal(payload.field, "expectedHeadSha");
+    assert.equal(calls.length, 1);
   });
 });
 

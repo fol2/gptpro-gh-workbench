@@ -185,6 +185,47 @@ class BrokerProbeTest(unittest.TestCase):
         self.assertEqual(seen_paths, ["/api/github/branches", "/api/github/files", "/api/github/branches/delete"])
         self.assertNotIn("write-session", json.dumps(result))
 
+    def test_merge_pr_posts_number_and_expected_head_sha(self):
+        probe = load_probe()
+        config = probe.parse_session_url("https://gptpro-gh-workbench.eugnel.uk/?session=merge-session")
+        seen_paths = []
+
+        def transport(request, timeout):
+            parsed = urlparse(request.full_url)
+            seen_paths.append(parsed.path)
+            body = json.loads(request.data.decode("utf-8"))
+            self.assertEqual(parsed.path, "/api/github/pulls/merge")
+            self.assertEqual(body, {
+                "number": 494,
+                "expectedHeadSha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                "title": "Merge agent work",
+                "message": "Merged through guarded broker.",
+            })
+            return FakeResponse(200, {
+                "merged": True,
+                "number": 494,
+                "method": "squash",
+                "sha": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+                "html_url": "https://github.com/fol2/ks2-mastery/pull/494",
+            })
+
+        result = probe.run_merge_pr(
+            config,
+            number=494,
+            expected_head_sha="aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            title="Merge agent work",
+            message="Merged through guarded broker.",
+            transport=transport,
+        )
+
+        self.assertTrue(result["ok"])
+        self.assertEqual(result["classification"], "merge_completed")
+        self.assertEqual(result["pull_request"]["number"], 494)
+        self.assertEqual(result["method"], "squash")
+        self.assertEqual(result["sha"], "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb")
+        self.assertEqual(seen_paths, ["/api/github/pulls/merge"])
+        self.assertNotIn("merge-session", json.dumps(result))
+
 
 if __name__ == "__main__":
     unittest.main()

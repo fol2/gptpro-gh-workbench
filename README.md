@@ -39,6 +39,7 @@ The Worker route is a constrained GitHub workbench broker:
 - `POST /api/github/files` creates or updates one repository file on an `agent/...` branch.
 - `POST /api/github/pulls` creates a pull request from an `agent/...` branch into `main`.
 - `POST /api/github/pulls/close` closes a pull request by number for smoke cleanup.
+- `POST /api/github/pulls/merge` squash-merges an open, non-draft `agent/...` pull request into `main` after validating the target repository, base branch, and optional expected head SHA.
 
 The private executor is still not connected: the Worker does not run shell commands, local tests, arbitrary Git operations, or repo-native scripts. GitHub writes are limited to fixed REST API operations against `fol2/ks2-mastery` using the Worker secret `GH_TOKEN`.
 
@@ -77,6 +78,14 @@ The default probe is read-only. The optional write smoke creates a temporary `ag
 python3 docs/ks2_workbench_broker_probe.py --write-smoke
 ```
 
+To authorise a guarded broker merge, give the agent the signed session URL and a specific PR number. The merge endpoint is intentionally narrow:
+
+```sh
+python3 docs/ks2_workbench_broker_probe.py --merge-pr 494 --expected-head-sha '<40-character-head-sha>'
+```
+
+The broker defaults to a squash merge and accepts only open, non-draft `agent/...` pull requests targeting `fol2/ks2-mastery:main`.
+
 Do not provide or export a GitHub token to the probe runtime. The Worker already holds GitHub authority through its own secret.
 
 ## Deployment
@@ -109,7 +118,8 @@ Set `WORKBENCH_DEPLOYMENT_STATUS` to the current deploy state, either as a Worke
 - No GitHub token, write credential, or executor credential is accepted from callers, echoed, or returned by the Worker.
 - A valid workbench session token is required before the dashboard or API endpoints return data.
 - The GitHub API base is fixed to `https://api.github.com/repos/fol2/ks2-mastery`.
-- Write endpoints reject direct `main` writes, non-`agent/...` branches, workflow file edits, path traversal, oversized bodies, and non-JSON requests.
-- Cleanup endpoints are limited to closing pull requests by number and deleting validated `agent/...` branch refs; they do not merge PRs or expose generic Git reference management.
-- There is no arbitrary URL fetch, generic proxy, shell execution, executor command execution, merge endpoint, admin endpoint, secret endpoint, or workflow endpoint.
+- Write endpoints reject direct `main` file writes, non-`agent/...` branches, workflow file edits, path traversal, oversized bodies, and non-JSON requests.
+- Cleanup endpoints are limited to closing pull requests by number and deleting validated `agent/...` branch refs; they do not expose generic Git reference management.
+- Merge authority is limited to open, non-draft `agent/...` pull requests from `fol2/ks2-mastery` into `main`, using squash merge only. Callers can pin `expectedHeadSha` to reject stale merges.
+- There is no arbitrary URL fetch, generic proxy, shell execution, executor command execution, direct-main file write endpoint, admin endpoint, secret endpoint, or workflow endpoint.
 - API responses include conservative security headers and CORS without credentials.
