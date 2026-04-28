@@ -14,6 +14,13 @@ const SESSION_COOKIE_NAME = "gptpro_workbench_session";
 const SESSION_QUERY_PARAM = "session";
 const WORKBENCH_SESSION_HEADER = "X-Workbench-Session";
 const WRITE_READY_PERMISSIONS = new Set(["ADMIN", "MAINTAIN", "WRITE"]);
+const ACTION_KV_BINDING = "WORKBENCH_ACTION_KV";
+const ACTION_PASSCODE_TTL_SECONDS = 600;
+const ACTION_SESSION_TTL_SECONDS = 1800;
+const ACTION_SESSION_MAX_REQUESTS = 50;
+const ACTION_SESSION_BODY_FIELD = "actionSession";
+const ACTION_PASSCODE_PREFIX = "WB";
+const ACTION_SESSION_PREFIX = "as";
 
 const READ_ENDPOINTS = [
   "/api/action/readiness",
@@ -26,6 +33,15 @@ const READ_ENDPOINTS = [
 ];
 
 const WRITE_ENDPOINTS = [
+  "POST /api/action/passcodes",
+  "POST /api/action/exchange",
+  "POST /api/action/readiness",
+  "POST /api/action/status",
+  "POST /api/action/actions",
+  "POST /api/action/github/repo",
+  "POST /api/action/github/auth",
+  "POST /api/action/github/prs",
+  "POST /api/action/github/issues",
   "POST /api/github/issues",
   "POST /api/github/comments",
   "POST /api/github/branches",
@@ -46,6 +62,26 @@ function buildActions(env = {}) {
     status: "enabled",
     method: "GET",
     endpoint: "/api/action/readiness"
+  },
+  {
+    id: "workbench.action.passcode.create",
+    label: "Create a one-time ChatGPT bootstrap passcode",
+    status: hasActionStore(env) ? "enabled" : "disabled",
+    method: "POST",
+    endpoint: "/api/action/passcodes",
+    reason: hasActionStore(env)
+      ? "Creates short-lived one-time passcodes after normal workbench session authentication."
+      : `${ACTION_KV_BINDING} is not configured.`
+  },
+  {
+    id: "workbench.action.exchange",
+    label: "Exchange a one-time passcode for a short-lived action session",
+    status: hasActionStore(env) ? "enabled" : "disabled",
+    method: "POST",
+    endpoint: "/api/action/exchange",
+    reason: hasActionStore(env)
+      ? "Allows ChatGPT API actions to carry actionSession in JSON bodies without seeing the workbench session token."
+      : `${ACTION_KV_BINDING} is not configured.`
   },
   {
     id: "github.repo.read",
@@ -143,14 +179,22 @@ export async function handleRequest(request, env = {}, ctx = {}) {
       : htmlResponse(renderHtmlError(405, "Method not allowed", "Only GET requests are enabled for browser paths."), 405);
   }
 
-  if (request.method === "POST" && !isWriteApiPath(url.pathname)) {
+  if (request.method === "POST" && !isPostApiPath(url.pathname)) {
     return url.pathname.startsWith("/api/")
-      ? jsonResponse({ error: "method_not_allowed", message: "POST is only enabled for allowlisted GitHub write endpoints." }, 405)
+      ? jsonResponse({ error: "method_not_allowed", message: "POST is only enabled for allowlisted Workbench action and GitHub write endpoints." }, 405)
       : htmlResponse(renderHtmlError(405, "Method not allowed", "Only GET requests are enabled for browser paths."), 405);
+  }
+
+  if (request.method === "POST" && url.pathname === "/api/action/exchange") {
+    return handleActionExchangeRequest(request, env);
   }
 
   const session = getSessionContext(request, env);
   if (!session.valid) {
+    if (request.method === "POST" && isActionSessionBodyPath(url.pathname)) {
+      return handleActionSessionPostRequest(request, env, url.pathname);
+    }
+
     return url.pathname.startsWith("/api/")
       ? jsonResponse({
         error: "unauthorised",
@@ -164,6 +208,14 @@ export async function handleRequest(request, env = {}, ctx = {}) {
   }
 
   if (request.method === "POST") {
+    if (url.pathname === "/api/action/passcodes") {
+      return handleActionPasscodeCreateRequest(request, env);
+    }
+
+    if (isActionReadPostPath(url.pathname)) {
+      return handleActionReadPostRequest(request, env, url.pathname);
+    }
+
     return handleGitHubWriteRequest(request, env, url.pathname);
   }
 
@@ -405,7 +457,356 @@ async function buildGitHubAuthStatus(env, targetRepo = TARGET_REPO) {
   };
 }
 
+async function handleActionPasscodeCreateRequest(request, env) {
+  const bodyResult = await readJsonBody(request);
+  if (!bodyResult.ok) {
+    return jsonResponse(bodyResult.payload, bodyResult.status, { cors: true });
+  }
+
+  const store = getActionStore(env);
+  if (!store) {
+    return githubResponse(actionStoreMissing());
+  }
+
+  const body = bodyResult.payload;
+  const targetRepo = resolveTargetRepo(body.repo);
+  if (!targetRepo.ok) {
+    return jsonResponse(targetRepo.payload, targetRepo.status, { cors: true });
+  }
+
+  const ttlSeconds = boundedInteger(
+    body.ttlSeconds,
+    "ttlSeconds",
+    ACTION_PASSCODE_TTL_SECONDS,
+    60,
+    1800
+  );
+  if (!ttlSeconds.ok) return jsonResponse(ttlSeconds.payload, ttlSeconds.status, { cors: true });
+
+  const sessionTtlSeconds = boundedInteger(
+    body.sessionTtlSeconds,
+    "sessionTtlSeconds",
+    ACTION_SESSION_TTL_SECONDS,
+    60,
+    3600
+  );
+  if (!sessionTtlSeconds.ok) return jsonResponse(sessionTtlSeconds.payload, sessionTtlSeconds.status, { cors: true });
+
+  const maxRequests = boundedInteger(
+    body.maxRequests,
+    "maxRequests",
+    ACTION_SESSION_MAX_REQUESTS,
+    1,
+    100
+  );
+  if (!maxRequests.ok) return jsonResponse(maxRequests.payload, maxRequests.status, { cors: true });
+
+  const write = optionalBoolean(body.write, "write", true);
+  if (!write.ok) return jsonResponse(write.payload, write.status, { cors: true });
+
+  const merge = optionalBoolean(body.merge, "merge", false);
+  if (!merge.ok) return jsonResponse(merge.payload, merge.status, { cors: true });
+  if (merge.value && !write.value) {
+    return jsonResponse(validationError("merge", "merge scope requires write scope.").payload, 400, { cors: true });
+  }
+
+  const now = nowSeconds();
+  const passcode = generateActionPasscode();
+  const record = {
+    type: "action_passcode",
+    repo: targetRepo.value,
+    read: true,
+    write: write.value,
+    merge: merge.value,
+    maxRequests: maxRequests.value,
+    sessionTtlSeconds: sessionTtlSeconds.value,
+    createdAt: now,
+    expiresAt: now + ttlSeconds.value
+  };
+
+  await store.put(actionPasscodeKey(await sha256Hex(passcode)), JSON.stringify(record), {
+    expirationTtl: ttlSeconds.value
+  });
+
+  return jsonResponse({
+    ok: true,
+    passcode,
+    expiresAt: isoFromSeconds(record.expiresAt),
+    scope: {
+      repo: record.repo,
+      read: record.read,
+      write: record.write,
+      merge: record.merge,
+      maxRequests: record.maxRequests,
+      sessionTtlSeconds: record.sessionTtlSeconds
+    }
+  }, 200, { cors: true });
+}
+
+async function handleActionExchangeRequest(request, env) {
+  const bodyResult = await readJsonBody(request);
+  if (!bodyResult.ok) {
+    return jsonResponse(bodyResult.payload, bodyResult.status, { cors: true });
+  }
+
+  const store = getActionStore(env);
+  if (!store) {
+    return githubResponse(actionStoreMissing());
+  }
+
+  const passcodeResult = parseActionPasscode(bodyResult.payload.passcode);
+  if (!passcodeResult.ok) {
+    return jsonResponse(passcodeResult.payload, passcodeResult.status, { cors: true });
+  }
+
+  const passcodeKey = actionPasscodeKey(await sha256Hex(passcodeResult.value));
+  const record = await store.get(passcodeKey, "json");
+  await store.delete(passcodeKey);
+
+  if (!record || record.type !== "action_passcode" || record.expiresAt <= nowSeconds()) {
+    return jsonResponse({
+      error: "invalid_action_passcode",
+      message: "The action passcode is invalid, expired, or already used."
+    }, 401, { cors: true });
+  }
+
+  if (hasExplicitRepo(bodyResult.payload.repo)) {
+    const requestedRepo = resolveTargetRepo(bodyResult.payload.repo);
+    if (!requestedRepo.ok) {
+      return jsonResponse(requestedRepo.payload, requestedRepo.status, { cors: true });
+    }
+
+    if (requestedRepo.value !== record.repo) {
+      return jsonResponse(validationError("repo", "repo must match the action passcode repository.").payload, 400, { cors: true });
+    }
+  }
+
+  const now = nowSeconds();
+  const actionSession = generateActionSession();
+  const sessionRecord = {
+    type: "action_session",
+    repo: record.repo,
+    read: record.read === true,
+    write: record.write === true,
+    merge: record.merge === true,
+    requestsRemaining: record.maxRequests,
+    createdAt: now,
+    lastUsedAt: null,
+    expiresAt: now + record.sessionTtlSeconds
+  };
+
+  await store.put(actionSessionKey(await sha256Hex(actionSession)), JSON.stringify(sessionRecord), {
+    expirationTtl: Math.max(60, record.sessionTtlSeconds)
+  });
+
+  return jsonResponse({
+    ok: true,
+    actionSession,
+    expiresAt: isoFromSeconds(sessionRecord.expiresAt),
+    scope: {
+      repo: sessionRecord.repo,
+      read: sessionRecord.read,
+      write: sessionRecord.write,
+      merge: sessionRecord.merge,
+      requestsRemaining: sessionRecord.requestsRemaining
+    }
+  }, 200, { cors: true });
+}
+
+async function handleActionReadPostRequest(request, env, pathname) {
+  const bodyResult = await readJsonBody(request);
+  if (!bodyResult.ok) {
+    return jsonResponse(bodyResult.payload, bodyResult.status, { cors: true });
+  }
+
+  return handleActionReadPostBody(bodyResult.payload, env, pathname, { requireActionSession: false });
+}
+
+async function handleActionSessionPostRequest(request, env, pathname) {
+  const bodyResult = await readJsonBody(request);
+  if (!bodyResult.ok) {
+    return jsonResponse(bodyResult.payload, bodyResult.status, { cors: true });
+  }
+
+  if (isActionReadPostPath(pathname)) {
+    return handleActionReadPostBody(bodyResult.payload, env, pathname, { requireActionSession: true });
+  }
+
+  if (isWriteApiPath(pathname)) {
+    const session = await consumeActionSession(bodyResult.payload, env, {
+      write: true,
+      merge: pathname === "/api/github/pulls/merge"
+    });
+    if (!session.ok) {
+      return jsonResponse(session.payload, session.status, { cors: true });
+    }
+
+    return handleGitHubWriteBody(session.body, env, pathname);
+  }
+
+  return jsonResponse({
+    error: "not_found",
+    message: "This action-session path is not allowlisted."
+  }, 404, { cors: true });
+}
+
+async function handleActionReadPostBody(body, env, pathname, options = {}) {
+  let effectiveBody = body;
+  let targetRepo;
+
+  if (options.requireActionSession || body[ACTION_SESSION_BODY_FIELD] !== undefined) {
+    const session = await consumeActionSession(body, env, { read: true });
+    if (!session.ok) {
+      return jsonResponse(session.payload, session.status, { cors: true });
+    }
+    effectiveBody = session.body;
+    targetRepo = { ok: true, value: session.repo };
+  } else {
+    targetRepo = resolveTargetRepo(body.repo);
+  }
+
+  if (!targetRepo.ok) {
+    return jsonResponse(targetRepo.payload, targetRepo.status, { cors: true });
+  }
+
+  if (pathname === "/api/action/status") {
+    return jsonResponse(buildStatus(env), 200, { cors: true });
+  }
+
+  if (pathname === "/api/action/actions") {
+    return jsonResponse({
+      service: SERVICE_NAME,
+      mode: hasGitHubToken(env) ? "github write broker" : "read-only without GH_TOKEN",
+      actions: buildActions(env)
+    }, 200, { cors: true });
+  }
+
+  if (pathname === "/api/action/readiness") {
+    return githubResponse(await buildActionReadiness(env, targetRepo.value));
+  }
+
+  if (pathname === "/api/action/github/auth") {
+    return githubResponse(await buildGitHubAuthStatus(env, targetRepo.value));
+  }
+
+  if (pathname === "/api/action/github/repo") {
+    return githubResponse(await fetchGitHubJson(`/repos/${targetRepo.value}`, env));
+  }
+
+  if (pathname === "/api/action/github/prs") {
+    const limit = parseLimit(effectiveBody.limit);
+    return githubResponse(await fetchGitHubJson(`/repos/${targetRepo.value}/pulls?state=open&per_page=${limit}`, env));
+  }
+
+  if (pathname === "/api/action/github/issues") {
+    const limit = parseLimit(effectiveBody.limit);
+    const result = await fetchGitHubJson(`/repos/${targetRepo.value}/issues?state=open&per_page=${limit}`, env);
+    if (!result.ok) {
+      return githubResponse(result);
+    }
+
+    const issues = result.payload;
+    return jsonResponse(Array.isArray(issues) ? issues.filter((issue) => !issue.pull_request) : issues, 200, { cors: true });
+  }
+
+  return jsonResponse({
+    error: "not_found",
+    message: "This action read path is not allowlisted."
+  }, 404, { cors: true });
+}
+
+async function consumeActionSession(body, env, requirements = {}) {
+  const actionSession = parseActionSession(body[ACTION_SESSION_BODY_FIELD]);
+  if (!actionSession.ok) {
+    return actionSession;
+  }
+
+  const store = getActionStore(env);
+  if (!store) {
+    return actionStoreMissing();
+  }
+
+  const key = actionSessionKey(await sha256Hex(actionSession.value));
+  const record = await store.get(key, "json");
+  const now = nowSeconds();
+
+  if (!record || record.type !== "action_session" || record.expiresAt <= now) {
+    return {
+      ok: false,
+      status: 401,
+      payload: {
+        error: "invalid_action_session",
+        message: "The action session is invalid or expired."
+      }
+    };
+  }
+
+  if (requirements.read && record.read !== true) {
+    return actionScopeDenied("read");
+  }
+
+  if (requirements.write && record.write !== true) {
+    return actionScopeDenied("write");
+  }
+
+  if (requirements.merge && record.merge !== true) {
+    return actionScopeDenied("merge");
+  }
+
+  if (hasExplicitRepo(body.repo)) {
+    const requestedRepo = resolveTargetRepo(body.repo);
+    if (!requestedRepo.ok) {
+      return requestedRepo;
+    }
+
+    if (requestedRepo.value !== record.repo) {
+      return validationError("repo", "repo must match the action session repository.");
+    }
+  }
+
+  if (!Number.isSafeInteger(record.requestsRemaining) || record.requestsRemaining < 1) {
+    await store.delete(key);
+    return {
+      ok: false,
+      status: 401,
+      payload: {
+        error: "action_session_exhausted",
+        message: "The action session has no requests remaining."
+      }
+    };
+  }
+
+  const updatedRecord = {
+    ...record,
+    requestsRemaining: record.requestsRemaining - 1,
+    lastUsedAt: now
+  };
+  await store.put(key, JSON.stringify(updatedRecord), {
+    expirationTtl: Math.max(60, record.expiresAt - now)
+  });
+
+  return {
+    ok: true,
+    status: 200,
+    repo: record.repo,
+    session: updatedRecord,
+    body: {
+      ...body,
+      repo: record.repo
+    }
+  };
+}
+
 async function handleGitHubWriteRequest(request, env, pathname) {
+  const bodyResult = await readJsonBody(request);
+  if (!bodyResult.ok) {
+    return jsonResponse(bodyResult.payload, bodyResult.status, { cors: true });
+  }
+
+  return handleGitHubWriteBody(bodyResult.payload, env, pathname);
+}
+
+async function handleGitHubWriteBody(body, env, pathname) {
   if (!hasGitHubToken(env)) {
     return jsonResponse({
       error: "github_token_missing",
@@ -413,12 +814,6 @@ async function handleGitHubWriteRequest(request, env, pathname) {
     }, 503, { cors: true });
   }
 
-  const bodyResult = await readJsonBody(request);
-  if (!bodyResult.ok) {
-    return jsonResponse(bodyResult.payload, bodyResult.status, { cors: true });
-  }
-
-  const body = bodyResult.payload;
   const targetRepo = resolveTargetRepo(body.repo);
   if (!targetRepo.ok) {
     return jsonResponse(targetRepo.payload, targetRepo.status, { cors: true });
@@ -471,7 +866,7 @@ async function readJsonBody(request) {
       status: 415,
       payload: {
         error: "unsupported_media_type",
-        message: "Write requests must use application/json."
+        message: "POST requests must use application/json."
       }
     };
   }
@@ -806,6 +1201,158 @@ function hasGitHubToken(env = {}) {
   return Boolean(env.GH_TOKEN || env.GITHUB_TOKEN);
 }
 
+function getActionStore(env = {}) {
+  const store = env[ACTION_KV_BINDING];
+  if (!store || typeof store.get !== "function" || typeof store.put !== "function" || typeof store.delete !== "function") {
+    return null;
+  }
+
+  return store;
+}
+
+function hasActionStore(env = {}) {
+  return Boolean(getActionStore(env));
+}
+
+function actionStoreMissing() {
+  return {
+    ok: false,
+    status: 503,
+    payload: {
+      error: "action_store_missing",
+      message: `${ACTION_KV_BINDING} is not configured.`
+    }
+  };
+}
+
+function actionScopeDenied(scope) {
+  return {
+    ok: false,
+    status: 403,
+    payload: {
+      error: "action_session_scope_denied",
+      message: `The action session does not grant ${scope} scope.`
+    }
+  };
+}
+
+function boundedInteger(value, field, fallback, min, max) {
+  if (value === undefined || value === null || value === "") {
+    return { ok: true, value: fallback };
+  }
+
+  if (!Number.isSafeInteger(value) || value < min || value > max) {
+    return validationError(field, `${field} must be an integer from ${min} to ${max}.`);
+  }
+
+  return { ok: true, value };
+}
+
+function optionalBoolean(value, field, fallback) {
+  if (value === undefined || value === null) {
+    return { ok: true, value: fallback };
+  }
+
+  if (typeof value !== "boolean") {
+    return validationError(field, `${field} must be a boolean.`);
+  }
+
+  return { ok: true, value };
+}
+
+function parseActionPasscode(value) {
+  if (typeof value !== "string") {
+    return validationError("passcode", "passcode must be a string.");
+  }
+
+  const passcode = value.trim().toUpperCase();
+  if (!new RegExp(`^${ACTION_PASSCODE_PREFIX}-[0-9A-F]{4}-[0-9A-F]{4}-[0-9A-F]{4}-[0-9A-F]{4}$`).test(passcode)) {
+    return {
+      ok: false,
+      status: 401,
+      payload: {
+        error: "invalid_action_passcode",
+        message: "The action passcode is invalid, expired, or already used."
+      }
+    };
+  }
+
+  return { ok: true, value: passcode };
+}
+
+function parseActionSession(value) {
+  if (typeof value !== "string" || !value.trim()) {
+    return {
+      ok: false,
+      status: 401,
+      payload: {
+        error: "action_session_required",
+        message: `A valid ${ACTION_SESSION_BODY_FIELD} JSON field is required.`
+      }
+    };
+  }
+
+  const actionSession = value.trim();
+  if (!new RegExp(`^${ACTION_SESSION_PREFIX}_[0-9a-f]{64}$`).test(actionSession)) {
+    return {
+      ok: false,
+      status: 401,
+      payload: {
+        error: "invalid_action_session",
+        message: "The action session is invalid or expired."
+      }
+    };
+  }
+
+  return { ok: true, value: actionSession };
+}
+
+function generateActionPasscode() {
+  const hex = randomHex(8).toUpperCase();
+  return [
+    ACTION_PASSCODE_PREFIX,
+    hex.slice(0, 4),
+    hex.slice(4, 8),
+    hex.slice(8, 12),
+    hex.slice(12, 16)
+  ].join("-");
+}
+
+function generateActionSession() {
+  return `${ACTION_SESSION_PREFIX}_${randomHex(32)}`;
+}
+
+function randomHex(byteCount) {
+  const bytes = new Uint8Array(byteCount);
+  crypto.getRandomValues(bytes);
+  return bytesToHex(bytes);
+}
+
+async function sha256Hex(value) {
+  const digest = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(value));
+  return bytesToHex(new Uint8Array(digest));
+}
+
+function bytesToHex(bytes) {
+  return Array.from(bytes, (byte) => byte.toString(16).padStart(2, "0")).join("");
+}
+
+function actionPasscodeKey(hash) {
+  return `action-passcode:${hash}`;
+}
+
+function actionSessionKey(hash) {
+  return `action-session:${hash}`;
+}
+
+function nowSeconds() {
+  return Math.floor(Date.now() / 1000);
+}
+
+function isoFromSeconds(seconds) {
+  return new Date(seconds * 1000).toISOString();
+}
+
 function permissionLabel(permissions = {}) {
   if (permissions?.admin) return "ADMIN";
   if (permissions?.maintain) return "MAINTAIN";
@@ -834,6 +1381,10 @@ function resolveTargetRepo(value) {
   }
 
   return { ok: true, value: repo };
+}
+
+function hasExplicitRepo(value) {
+  return value !== undefined && value !== null && value !== "";
 }
 
 function positiveInteger(value, field) {
@@ -1148,6 +1699,14 @@ function isSafeApiPath(pathname) {
   return [
     "/api/status",
     "/api/action/readiness",
+    "/api/action/passcodes",
+    "/api/action/exchange",
+    "/api/action/status",
+    "/api/action/actions",
+    "/api/action/github/auth",
+    "/api/action/github/repo",
+    "/api/action/github/prs",
+    "/api/action/github/issues",
     "/api/actions",
     "/api/github/auth",
     "/api/github/repo",
@@ -1160,6 +1719,29 @@ function isSafeApiPath(pathname) {
     "/api/github/pulls",
     "/api/github/pulls/close",
     "/api/github/pulls/merge"
+  ].includes(pathname);
+}
+
+function isPostApiPath(pathname) {
+  return pathname === "/api/action/passcodes" ||
+    pathname === "/api/action/exchange" ||
+    isActionReadPostPath(pathname) ||
+    isWriteApiPath(pathname);
+}
+
+function isActionSessionBodyPath(pathname) {
+  return isActionReadPostPath(pathname) || isWriteApiPath(pathname);
+}
+
+function isActionReadPostPath(pathname) {
+  return [
+    "/api/action/readiness",
+    "/api/action/status",
+    "/api/action/actions",
+    "/api/action/github/auth",
+    "/api/action/github/repo",
+    "/api/action/github/prs",
+    "/api/action/github/issues"
   ].includes(pathname);
 }
 

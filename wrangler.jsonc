@@ -9,5 +9,11 @@
       "pattern": "gptpro-gh-workbench.eugnel.uk/*",
       "zone_name": "eugnel.uk"
     }
+  ],
+  "kv_namespaces": [
+    {
+      "binding": "WORKBENCH_ACTION_KV",
+      "id": "1ada5703d7884010a342468696b34622"
+    }
   ]
 }
