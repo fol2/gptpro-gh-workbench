@@ -1,0 +1,19 @@
+{
+  "name": "gptpro-gh-workbench",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Read-only Cloudflare Worker portal foundation for the GPTPro GitHub Workbench.",
+  "scripts": {
+    "test": "node --test",
+    "check": "node --check src/worker.js && node --check tests/worker.test.js",
+    "dev": "wrangler dev",
+    "deploy": "wrangler deploy"
+  },
+  "devDependencies": {
+    "wrangler": "^4.14.4"
+  },
+  "engines": {
+    "node": ">=20"
+  }
+}

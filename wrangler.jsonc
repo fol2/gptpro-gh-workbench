@@ -1,0 +1,13 @@
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "gptpro-gh-workbench",
+  "main": "src/worker.js",
+  "compatibility_date": "2026-04-28",
+  "workers_dev": true,
+  "routes": [
+    {
+      "pattern": "gptpro-gh-workbench.eugnel.uk",
+      "custom_domain": true
+    }
+  ]
+}
