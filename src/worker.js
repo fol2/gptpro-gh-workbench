@@ -126,7 +126,7 @@ export async function handleRequest(request, env = {}, ctx = {}) {
       env,
       sessionQueryToken: session.source === "query" ? session.token : null
     }), 200, {
-      headers: sessionCookieHeaders(session, url)
+      headers: sessionCookieHeaders(session)
     });
   }
 
@@ -286,14 +286,13 @@ function getSessionContext(request, env = {}) {
   return { valid: false, source: "invalid", token: null };
 }
 
-function sessionCookieHeaders(session, url) {
+function sessionCookieHeaders(session) {
   if (session.source !== "query" || !session.token) {
     return {};
   }
 
-  const secureFlag = url.protocol === "https:" ? "; Secure" : "";
   return {
-    "Set-Cookie": `${SESSION_COOKIE_NAME}=${encodeURIComponent(session.token)}; Path=/; Max-Age=3600; HttpOnly; SameSite=Strict${secureFlag}`
+    "Set-Cookie": `${SESSION_COOKIE_NAME}=${encodeURIComponent(session.token)}; Path=/; Max-Age=3600; HttpOnly; SameSite=Strict; Secure`
   };
 }
 
