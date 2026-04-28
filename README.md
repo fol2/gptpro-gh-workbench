@@ -37,7 +37,7 @@ npm install
 Run the Worker locally:
 
 ```sh
-npm run dev
+npm run dev -- --var WORKBENCH_SESSION_TOKEN:dev-session
 ```
 
 Run tests and static checks:
@@ -65,6 +65,8 @@ npm run deploy
 ```
 
 The deployed Worker requires `WORKBENCH_SESSION_TOKEN` as a secret. Open the portal with either a short-lived `?session=...` link or a `gptpro_workbench_session` cookie matching that secret.
+
+Set the non-secret `WORKBENCH_DEPLOYMENT_STATUS` environment variable to the current deploy state. Leave it unset before deployment; after a successful deploy and live smoke, set it to a concrete value such as `deployed/live-smoked on 2026-04-28`.
 
 Current blocker: Wrangler authentication was failing in the parent SDLC session, so this repository does not claim that the Worker is deployed or live on Cloudflare yet.
 

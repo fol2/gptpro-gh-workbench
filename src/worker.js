@@ -107,7 +107,8 @@ export async function handleRequest(request, env = {}, ctx = {}) {
       : htmlResponse(renderHtmlError(405, "Method not allowed", "Only GET requests are enabled in this read-only portal."), 405);
   }
 
-  if (!hasValidSession(request, env)) {
+  const session = getSessionContext(request, env);
+  if (!session.valid) {
     return url.pathname.startsWith("/api/")
       ? jsonResponse({
         error: "unauthorised",
@@ -121,11 +122,16 @@ export async function handleRequest(request, env = {}, ctx = {}) {
   }
 
   if (url.pathname === "/") {
-    return htmlResponse(renderDashboard());
+    return htmlResponse(renderDashboard({
+      env,
+      sessionQueryToken: session.source === "query" ? session.token : null
+    }), 200, {
+      headers: sessionCookieHeaders(session, url)
+    });
   }
 
   if (url.pathname === "/api/status") {
-    return jsonResponse(buildStatus(), 200, { cors: true });
+    return jsonResponse(buildStatus(env), 200, { cors: true });
   }
 
   if (url.pathname === "/api/actions") {
@@ -167,14 +173,14 @@ export async function handleRequest(request, env = {}, ctx = {}) {
   return htmlResponse(renderHtmlError(404, "Not found", "This browser path is not part of the portal foundation."), 404);
 }
 
-export function buildStatus() {
+export function buildStatus(env = {}) {
   return {
     service: SERVICE_NAME,
     project_repo: PROJECT_REPO,
     target_repo: TARGET_REPO,
     capability_mode: "read-only foundation",
     portal_status: "responding/read-only foundation",
-    deployment_status: "not claimed until deployed and live-smoked",
+    deployment_status: env.WORKBENCH_DEPLOYMENT_STATUS || "not claimed until deployed and live-smoked",
     access_status: "session required",
     executor_status: {
       connected: false,
@@ -259,17 +265,36 @@ function upstreamStatus(status) {
   return 502;
 }
 
-function hasValidSession(request, env = {}) {
+function getSessionContext(request, env = {}) {
   const expected = env.WORKBENCH_SESSION_TOKEN;
   if (!expected) {
-    return false;
+    return { valid: false, source: "missing-secret", token: null };
   }
 
   const url = new URL(request.url);
   const suppliedQueryToken = url.searchParams.get(SESSION_QUERY_PARAM);
   const suppliedCookieToken = readCookie(request.headers.get("Cookie"), SESSION_COOKIE_NAME);
 
-  return safeEqual(suppliedQueryToken, expected) || safeEqual(suppliedCookieToken, expected);
+  if (safeEqual(suppliedQueryToken, expected)) {
+    return { valid: true, source: "query", token: suppliedQueryToken };
+  }
+
+  if (safeEqual(suppliedCookieToken, expected)) {
+    return { valid: true, source: "cookie", token: suppliedCookieToken };
+  }
+
+  return { valid: false, source: "invalid", token: null };
+}
+
+function sessionCookieHeaders(session, url) {
+  if (session.source !== "query" || !session.token) {
+    return {};
+  }
+
+  const secureFlag = url.protocol === "https:" ? "; Secure" : "";
+  return {
+    "Set-Cookie": `${SESSION_COOKIE_NAME}=${encodeURIComponent(session.token)}; Path=/; Max-Age=3600; HttpOnly; SameSite=Strict${secureFlag}`
+  };
 }
 
 function readCookie(cookieHeader, name) {
@@ -313,11 +338,12 @@ function jsonResponse(body, status = 200, options = {}) {
   });
 }
 
-function htmlResponse(body, status = 200) {
+function htmlResponse(body, status = 200, options = {}) {
   return new Response(body, {
     status,
     headers: {
       ...SECURITY_HEADERS,
+      ...(options.headers ?? {}),
       "Content-Type": "text/html; charset=utf-8",
       "Cache-Control": "no-store"
     }
@@ -334,8 +360,8 @@ function isSafeApiPath(pathname) {
   ].includes(pathname);
 }
 
-function renderDashboard() {
-  const status = buildStatus();
+function renderDashboard({ env = {}, sessionQueryToken = null } = {}) {
+  const status = buildStatus(env);
   const actionRows = ACTIONS.map((action) => `
         <tr>
           <td>${escapeHtml(action.id)}</td>
@@ -343,7 +369,7 @@ function renderDashboard() {
           <td>${escapeHtml(action.label)}</td>
         </tr>`).join("");
   const endpointLinks = READ_ENDPOINTS.map((endpoint) => `
-        <li><a href="${escapeAttribute(endpoint)}">${escapeHtml(endpoint)}</a></li>`).join("");
+        <li><a href="${escapeAttribute(endpointHref(endpoint, sessionQueryToken))}">${escapeHtml(endpoint)}</a></li>`).join("");
 
   return `<!doctype html>
 <html lang="en">
@@ -580,6 +606,16 @@ function renderDashboard() {
     </main>
   </body>
 </html>`;
+}
+
+function endpointHref(endpoint, sessionQueryToken) {
+  if (!sessionQueryToken) {
+    return endpoint;
+  }
+
+  const url = new URL(endpoint, "https://workbench.local");
+  url.searchParams.set(SESSION_QUERY_PARAM, sessionQueryToken);
+  return `${url.pathname}${url.search}`;
 }
 
 function renderHtmlError(status, title, message) {

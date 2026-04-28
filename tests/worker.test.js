@@ -33,8 +33,11 @@ test("dashboard is browser-readable and states executor is disconnected", async 
   assert.match(html, /read-only/i);
   assert.match(html, /private executor is not connected yet/i);
   assert.match(html, /not claimed until deployed and live-smoked/i);
-  assert.match(html, /\/api\/status/);
+  assert.match(html, /href="\/api\/status\?session=test-session"/);
+  assert.match(html, /href="\/api\/github\/prs\?limit=5&amp;session=test-session"/);
   assert.match(html, /fol2\/ks2-mastery/);
+  assert.match(response.headers.get("set-cookie") ?? "", /gptpro_workbench_session=test-session/);
+  assert.match(response.headers.get("set-cookie") ?? "", /HttpOnly/);
 });
 
 test("actions endpoint marks writes and executor actions disabled", async () => {
@@ -137,6 +140,27 @@ test("cookie session is accepted without query token", async () => {
   }), TEST_ENV);
 
   assert.equal(response.status, 200);
+});
+
+test("cookie dashboard access does not echo the session token into links", async () => {
+  const response = await handleRequest(new Request(`${ORIGIN}/`, {
+    headers: {
+      Cookie: "gptpro_workbench_session=test-session"
+    }
+  }), TEST_ENV);
+  const html = await response.text();
+
+  assert.equal(response.status, 200);
+  assert.match(html, /href="\/api\/status"/);
+  assert.doesNotMatch(html, /session=test-session/);
+});
+
+test("deployment status can be supplied from environment", () => {
+  const payload = buildStatus({
+    WORKBENCH_DEPLOYMENT_STATUS: "deployed/live-smoked on 2026-04-28"
+  });
+
+  assert.equal(payload.deployment_status, "deployed/live-smoked on 2026-04-28");
 });
 
 test("GitHub upstream failures propagate as non-200 responses", async () => {
