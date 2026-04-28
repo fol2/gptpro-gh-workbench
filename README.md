@@ -55,7 +55,7 @@ The Worker configuration uses:
 - Worker name: `gptpro-gh-workbench`
 - Main entry: `src/worker.js`
 - Compatibility date: `2026-04-28`
-- `workers_dev`: enabled
+- `workers_dev`: disabled
 - Custom domain route candidate: `gptpro-gh-workbench.eugnel.uk`
 
 Deploy once Cloudflare Wrangler authentication is working:
@@ -64,12 +64,15 @@ Deploy once Cloudflare Wrangler authentication is working:
 npm run deploy
 ```
 
+The deployed Worker requires `WORKBENCH_SESSION_TOKEN` as a secret. Open the portal with either a short-lived `?session=...` link or a `gptpro_workbench_session` cookie matching that secret.
+
 Current blocker: Wrangler authentication was failing in the parent SDLC session, so this repository does not claim that the Worker is deployed or live on Cloudflare yet.
 
 ## Security Boundaries
 
 - No secrets are stored in code or configuration.
 - No token is accepted, echoed, or returned by the Worker.
+- A valid workbench session token is required before the dashboard or API endpoints return data.
 - The GitHub API base is fixed to `https://api.github.com/repos/fol2/ks2-mastery`.
 - There is no arbitrary URL fetch, generic proxy, shell execution, executor command execution, or GitHub write operation.
 - API responses include conservative security headers and read-only CORS without credentials.

@@ -4,6 +4,8 @@ const TARGET_REPO = "fol2/ks2-mastery";
 const GITHUB_API_BASE = "https://api.github.com/repos/fol2/ks2-mastery";
 const MAX_GITHUB_LIMIT = 10;
 const DEFAULT_GITHUB_LIMIT = 5;
+const SESSION_COOKIE_NAME = "gptpro_workbench_session";
+const SESSION_QUERY_PARAM = "session";
 
 const READ_ENDPOINTS = [
   "/api/status",
@@ -105,6 +107,19 @@ export async function handleRequest(request, env = {}, ctx = {}) {
       : htmlResponse(renderHtmlError(405, "Method not allowed", "Only GET requests are enabled in this read-only portal."), 405);
   }
 
+  if (!hasValidSession(request, env)) {
+    return url.pathname.startsWith("/api/")
+      ? jsonResponse({
+        error: "unauthorised",
+        message: "A valid workbench session is required."
+      }, 401)
+      : htmlResponse(renderHtmlError(
+        401,
+        "Session required",
+        "This portal is protected. Open it with a short-lived workbench session link."
+      ), 401);
+  }
+
   if (url.pathname === "/") {
     return htmlResponse(renderDashboard());
   }
@@ -122,17 +137,22 @@ export async function handleRequest(request, env = {}, ctx = {}) {
   }
 
   if (url.pathname === "/api/github/repo") {
-    return jsonResponse(await fetchGitHubJson(""), 200, { cors: true });
+    return githubResponse(await fetchGitHubJson(""));
   }
 
   if (url.pathname === "/api/github/prs") {
     const limit = parseLimit(url.searchParams.get("limit"));
-    return jsonResponse(await fetchGitHubJson(`/pulls?state=open&per_page=${limit}`), 200, { cors: true });
+    return githubResponse(await fetchGitHubJson(`/pulls?state=open&per_page=${limit}`));
   }
 
   if (url.pathname === "/api/github/issues") {
     const limit = parseLimit(url.searchParams.get("limit"));
-    const issues = await fetchGitHubJson(`/issues?state=open&per_page=${limit}`);
+    const result = await fetchGitHubJson(`/issues?state=open&per_page=${limit}`);
+    if (!result.ok) {
+      return githubResponse(result);
+    }
+
+    const issues = result.payload;
     return jsonResponse(Array.isArray(issues) ? issues.filter((issue) => !issue.pull_request) : issues, 200, { cors: true });
   }
 
@@ -153,7 +173,9 @@ export function buildStatus() {
     project_repo: PROJECT_REPO,
     target_repo: TARGET_REPO,
     capability_mode: "read-only foundation",
-    portal_status: "live/read-only foundation",
+    portal_status: "responding/read-only foundation",
+    deployment_status: "not claimed until deployed and live-smoked",
+    access_status: "session required",
     executor_status: {
       connected: false,
       status: "not connected",
@@ -179,27 +201,101 @@ export function parseLimit(value) {
 }
 
 async function fetchGitHubJson(path) {
-  const response = await fetch(`${GITHUB_API_BASE}${path}`, {
-    headers: {
-      "Accept": "application/vnd.github+json",
-      "User-Agent": "gptpro-gh-workbench-readonly-portal",
-      "X-GitHub-Api-Version": "2022-11-28"
+  try {
+    const response = await fetch(`${GITHUB_API_BASE}${path}`, {
+      headers: {
+        "Accept": "application/vnd.github+json",
+        "User-Agent": "gptpro-gh-workbench-readonly-portal",
+        "X-GitHub-Api-Version": "2022-11-28"
+      }
+    });
+
+    const payload = await response.json().catch(() => ({
+      message: "GitHub returned a non-JSON response."
+    }));
+
+    if (!response.ok) {
+      return {
+        ok: false,
+        status: upstreamStatus(response.status),
+        payload: {
+          error: "github_request_failed",
+          upstream_status: response.status,
+          message: payload.message ?? "GitHub request failed."
+        }
+      };
     }
-  });
 
-  const payload = await response.json().catch(() => ({
-    message: "GitHub returned a non-JSON response."
-  }));
-
-  if (!response.ok) {
+    return { ok: true, status: 200, payload };
+  } catch {
     return {
-      error: "github_request_failed",
-      status: response.status,
-      message: payload.message ?? "GitHub request failed."
+      ok: false,
+      status: 502,
+      payload: {
+        error: "github_request_failed",
+        message: "GitHub request could not be completed."
+      }
     };
   }
+}
 
-  return payload;
+function githubResponse(result) {
+  return jsonResponse(result.payload, result.status, { cors: true });
+}
+
+function upstreamStatus(status) {
+  if (status === 403 || status === 429) {
+    return 503;
+  }
+
+  if (status >= 400 && status < 500) {
+    return 502;
+  }
+
+  if (status >= 500) {
+    return 502;
+  }
+
+  return 502;
+}
+
+function hasValidSession(request, env = {}) {
+  const expected = env.WORKBENCH_SESSION_TOKEN;
+  if (!expected) {
+    return false;
+  }
+
+  const url = new URL(request.url);
+  const suppliedQueryToken = url.searchParams.get(SESSION_QUERY_PARAM);
+  const suppliedCookieToken = readCookie(request.headers.get("Cookie"), SESSION_COOKIE_NAME);
+
+  return safeEqual(suppliedQueryToken, expected) || safeEqual(suppliedCookieToken, expected);
+}
+
+function readCookie(cookieHeader, name) {
+  if (!cookieHeader) return null;
+
+  for (const part of cookieHeader.split(";")) {
+    const [rawKey, ...rawValue] = part.trim().split("=");
+    if (rawKey === name) {
+      return rawValue.join("=");
+    }
+  }
+
+  return null;
+}
+
+function safeEqual(left, right) {
+  if (!left || !right || left.length !== right.length) {
+    return false;
+  }
+
+  let mismatch = 0;
+  for (let index = 0; index < left.length; index += 1) {
+    mismatch |= left.charCodeAt(index) ^ right.charCodeAt(index);
+  }
+
+  return mismatch === 0;
 }
 
 function jsonResponse(body, status = 200, options = {}) {
@@ -430,6 +526,14 @@ function renderDashboard() {
             <div class="metric">
               <strong>Capability</strong>
               <span>${escapeHtml(status.capability_mode)}</span>
+            </div>
+            <div class="metric">
+              <strong>Deployment</strong>
+              <span class="warn">${escapeHtml(status.deployment_status)}</span>
+            </div>
+            <div class="metric">
+              <strong>Access</strong>
+              <span>${escapeHtml(status.access_status)}</span>
             </div>
             <div class="metric">
               <strong>Executor</strong>
