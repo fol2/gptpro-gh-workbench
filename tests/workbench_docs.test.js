@@ -48,6 +48,8 @@ test("runtime report distinguishes deployed broker capability from runtime opera
   assert.match(readme, /POST \/api\/github\/pulls\/close/);
   assert.match(readme, /POST \/api\/github\/branches\/delete/);
   assert.match(readme, /POST \/api\/github\/pulls\/merge/);
+  assert.match(readme, /fol2\/gptpro-gh-workbench/);
+  assert.match(readme, /--repo fol2\/gptpro-gh-workbench/);
   assert.match(readme, /open, non-draft `agent\/\.\.\.` pull requests/i);
   assert.match(readme, /There is no arbitrary URL fetch, generic proxy, shell execution/i);
 });

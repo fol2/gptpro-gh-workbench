@@ -1,6 +1,7 @@
 const SERVICE_NAME = "GPTPro GitHub Workbench Portal";
 const PROJECT_REPO = "fol2/gptpro-gh-workbench";
 const TARGET_REPO = "fol2/ks2-mastery";
+const ALLOWED_TARGET_REPOS = [TARGET_REPO, PROJECT_REPO];
 const TARGET_DEFAULT_BRANCH = "main";
 const GITHUB_API_ROOT = "https://api.github.com";
 const GITHUB_API_BASE = `${GITHUB_API_ROOT}/repos/${TARGET_REPO}`;
@@ -64,7 +65,7 @@ function buildActions(env = {}) {
     method: "POST",
     endpoint: "/api/github/*",
     reason: writeEnabled
-      ? "Enabled for allowlisted operations on fol2/ks2-mastery only; merges are limited to open non-draft agent pull requests into main."
+      ? "Enabled for allowlisted operations on approved repositories only; merges are limited to open non-draft agent pull requests into main."
       : "Disabled until GH_TOKEN is configured as a Worker secret."
   },
   {
@@ -178,21 +179,29 @@ export async function handleRequest(request, env = {}, ctx = {}) {
   }
 
   if (url.pathname === "/api/github/auth") {
-    return githubResponse(await buildGitHubAuthStatus(env));
+    const targetRepo = targetRepoFromQuery(url);
+    if (!targetRepo.ok) return githubResponse(targetRepo);
+    return githubResponse(await buildGitHubAuthStatus(env, targetRepo.value));
   }
 
   if (url.pathname === "/api/github/repo") {
-    return githubResponse(await fetchGitHubJson(`/repos/${TARGET_REPO}`));
+    const targetRepo = targetRepoFromQuery(url);
+    if (!targetRepo.ok) return githubResponse(targetRepo);
+    return githubResponse(await fetchGitHubJson(`/repos/${targetRepo.value}`));
   }
 
   if (url.pathname === "/api/github/prs") {
+    const targetRepo = targetRepoFromQuery(url);
+    if (!targetRepo.ok) return githubResponse(targetRepo);
     const limit = parseLimit(url.searchParams.get("limit"));
-    return githubResponse(await fetchGitHubJson(`/repos/${TARGET_REPO}/pulls?state=open&per_page=${limit}`));
+    return githubResponse(await fetchGitHubJson(`/repos/${targetRepo.value}/pulls?state=open&per_page=${limit}`));
   }
 
   if (url.pathname === "/api/github/issues") {
+    const targetRepo = targetRepoFromQuery(url);
+    if (!targetRepo.ok) return githubResponse(targetRepo);
     const limit = parseLimit(url.searchParams.get("limit"));
-    const result = await fetchGitHubJson(`/repos/${TARGET_REPO}/issues?state=open&per_page=${limit}`);
+    const result = await fetchGitHubJson(`/repos/${targetRepo.value}/issues?state=open&per_page=${limit}`);
     if (!result.ok) {
       return githubResponse(result);
     }
@@ -220,6 +229,8 @@ export function buildStatus(env = {}) {
     service: SERVICE_NAME,
     project_repo: PROJECT_REPO,
     target_repo: TARGET_REPO,
+    default_target_repo: TARGET_REPO,
+    allowed_target_repos: ALLOWED_TARGET_REPOS,
     capability_mode: writeEnabled ? "session-protected github write broker" : "read-only without GH_TOKEN",
     portal_status: writeEnabled ? "responding/github write broker" : "responding/read-only without GH_TOKEN",
     deployment_status: env.WORKBENCH_DEPLOYMENT_STATUS || "not claimed until deployed and live-smoked",
@@ -233,12 +244,13 @@ export function buildStatus(env = {}) {
       enabled: writeEnabled,
       status: writeEnabled ? "enabled via GH_TOKEN Worker secret" : "disabled/missing GH_TOKEN",
       note: writeEnabled
-        ? "GitHub writes are constrained to allowlisted repository API operations on fol2/ks2-mastery; the token is never returned."
+        ? `GitHub writes are constrained to allowlisted repository API operations on ${ALLOWED_TARGET_REPOS.join(", ")}; the token is never returned.`
         : "No GitHub write credential is configured for this Worker."
     },
     allowlisted_read_endpoints: READ_ENDPOINTS,
     allowlisted_write_endpoints: WRITE_ENDPOINTS,
-    github_api_base: GITHUB_API_BASE
+    github_api_base: GITHUB_API_BASE,
+    github_api_bases: ALLOWED_TARGET_REPOS.map((repo) => `${GITHUB_API_ROOT}/repos/${repo}`)
   };
 }
 
@@ -251,7 +263,7 @@ export function parseLimit(value) {
   return Math.min(parsed, MAX_GITHUB_LIMIT);
 }
 
-async function buildGitHubAuthStatus(env) {
+async function buildGitHubAuthStatus(env, targetRepo = TARGET_REPO) {
   if (!hasGitHubToken(env)) {
     return {
       ok: false,
@@ -268,7 +280,7 @@ async function buildGitHubAuthStatus(env) {
     return user;
   }
 
-  const repo = await fetchGitHubJson(`/repos/${TARGET_REPO}`, env);
+  const repo = await fetchGitHubJson(`/repos/${targetRepo}`, env);
   if (!repo.ok) {
     return repo;
   }
@@ -278,7 +290,8 @@ async function buildGitHubAuthStatus(env) {
     status: 200,
     payload: {
       service: SERVICE_NAME,
-      target_repo: TARGET_REPO,
+      target_repo: targetRepo,
+      allowed_target_repos: ALLOWED_TARGET_REPOS,
       authenticated: true,
       github_user: {
         login: user.payload.login,
@@ -323,36 +336,41 @@ async function handleGitHubWriteRequest(request, env, pathname) {
   }
 
   const body = bodyResult.payload;
+  const targetRepo = resolveTargetRepo(body.repo);
+  if (!targetRepo.ok) {
+    return jsonResponse(targetRepo.payload, targetRepo.status, { cors: true });
+  }
+
   if (pathname === "/api/github/issues") {
-    return githubResponse(await createIssue(body, env));
+    return githubResponse(await createIssue(body, env, targetRepo.value));
   }
 
   if (pathname === "/api/github/comments") {
-    return githubResponse(await createIssueComment(body, env));
+    return githubResponse(await createIssueComment(body, env, targetRepo.value));
   }
 
   if (pathname === "/api/github/branches") {
-    return githubResponse(await createAgentBranch(body, env));
+    return githubResponse(await createAgentBranch(body, env, targetRepo.value));
   }
 
   if (pathname === "/api/github/branches/delete") {
-    return githubResponse(await deleteAgentBranch(body, env));
+    return githubResponse(await deleteAgentBranch(body, env, targetRepo.value));
   }
 
   if (pathname === "/api/github/files") {
-    return githubResponse(await putRepositoryFile(body, env));
+    return githubResponse(await putRepositoryFile(body, env, targetRepo.value));
   }
 
   if (pathname === "/api/github/pulls") {
-    return githubResponse(await createPullRequest(body, env));
+    return githubResponse(await createPullRequest(body, env, targetRepo.value));
   }
 
   if (pathname === "/api/github/pulls/close") {
-    return githubResponse(await closePullRequest(body, env));
+    return githubResponse(await closePullRequest(body, env, targetRepo.value));
   }
 
   if (pathname === "/api/github/pulls/merge") {
-    return githubResponse(await mergePullRequest(body, env));
+    return githubResponse(await mergePullRequest(body, env, targetRepo.value));
   }
 
   return jsonResponse({
@@ -413,14 +431,14 @@ async function readJsonBody(request) {
   }
 }
 
-async function createIssue(body, env) {
+async function createIssue(body, env, targetRepo) {
   const title = boundedText(body.title, "title", 256, { required: true });
   if (!title.ok) return title;
 
   const issueBody = boundedText(body.body ?? "", "body", 8192);
   if (!issueBody.ok) return issueBody;
 
-  return fetchGitHubJson(`/repos/${TARGET_REPO}/issues`, env, {
+  return fetchGitHubJson(`/repos/${targetRepo}/issues`, env, {
     method: "POST",
     body: {
       title: title.value,
@@ -429,14 +447,14 @@ async function createIssue(body, env) {
   });
 }
 
-async function createIssueComment(body, env) {
+async function createIssueComment(body, env, targetRepo) {
   const number = positiveInteger(body.number, "number");
   if (!number.ok) return number;
 
   const commentBody = boundedText(body.body, "body", 8192, { required: true });
   if (!commentBody.ok) return commentBody;
 
-  return fetchGitHubJson(`/repos/${TARGET_REPO}/issues/${number.value}/comments`, env, {
+  return fetchGitHubJson(`/repos/${targetRepo}/issues/${number.value}/comments`, env, {
     method: "POST",
     body: {
       body: commentBody.value
@@ -444,11 +462,11 @@ async function createIssueComment(body, env) {
   });
 }
 
-async function createAgentBranch(body, env) {
+async function createAgentBranch(body, env, targetRepo) {
   const branch = validateAgentBranch(body.branch);
   if (!branch.ok) return branch;
 
-  const base = await fetchGitHubJson(`/repos/${TARGET_REPO}/git/ref/heads/${TARGET_DEFAULT_BRANCH}`, env);
+  const base = await fetchGitHubJson(`/repos/${targetRepo}/git/ref/heads/${TARGET_DEFAULT_BRANCH}`, env);
   if (!base.ok) return base;
 
   const sha = base.payload?.object?.sha;
@@ -456,7 +474,7 @@ async function createAgentBranch(body, env) {
     return validationError("from_sha", "Base branch SHA could not be resolved.");
   }
 
-  const created = await fetchGitHubJson(`/repos/${TARGET_REPO}/git/refs`, env, {
+  const created = await fetchGitHubJson(`/repos/${targetRepo}/git/refs`, env, {
     method: "POST",
     body: {
       ref: `refs/heads/${branch.value}`,
@@ -467,7 +485,7 @@ async function createAgentBranch(body, env) {
   return normaliseReferenceAlreadyExists(created);
 }
 
-async function putRepositoryFile(body, env) {
+async function putRepositoryFile(body, env, targetRepo) {
   const branch = validateAgentBranch(body.branch);
   if (!branch.ok) return branch;
 
@@ -482,7 +500,7 @@ async function putRepositoryFile(body, env) {
 
   const filePath = encodeRepoPath(path.value);
   const existing = await fetchGitHubJson(
-    `/repos/${TARGET_REPO}/contents/${filePath}?ref=${encodeURIComponent(branch.value)}`,
+    `/repos/${targetRepo}/contents/${filePath}?ref=${encodeURIComponent(branch.value)}`,
     env
   );
 
@@ -491,7 +509,7 @@ async function putRepositoryFile(body, env) {
   }
 
   const sha = existing.ok ? existing.payload?.sha : null;
-  return fetchGitHubJson(`/repos/${TARGET_REPO}/contents/${filePath}`, env, {
+  return fetchGitHubJson(`/repos/${targetRepo}/contents/${filePath}`, env, {
     method: "PUT",
     body: {
       message: message.value,
@@ -502,7 +520,7 @@ async function putRepositoryFile(body, env) {
   });
 }
 
-async function createPullRequest(body, env) {
+async function createPullRequest(body, env, targetRepo) {
   const branch = validateAgentBranch(body.branch || body.head);
   if (!branch.ok) return branch;
 
@@ -512,7 +530,7 @@ async function createPullRequest(body, env) {
   const prBody = boundedText(body.body ?? "", "body", 8192);
   if (!prBody.ok) return prBody;
 
-  return fetchGitHubJson(`/repos/${TARGET_REPO}/pulls`, env, {
+  return fetchGitHubJson(`/repos/${targetRepo}/pulls`, env, {
     method: "POST",
     body: {
       title: title.value,
@@ -524,11 +542,11 @@ async function createPullRequest(body, env) {
   });
 }
 
-async function closePullRequest(body, env) {
+async function closePullRequest(body, env, targetRepo) {
   const number = positiveInteger(body.number, "number");
   if (!number.ok) return number;
 
-  return fetchGitHubJson(`/repos/${TARGET_REPO}/pulls/${number.value}`, env, {
+  return fetchGitHubJson(`/repos/${targetRepo}/pulls/${number.value}`, env, {
     method: "PATCH",
     body: {
       state: "closed"
@@ -536,7 +554,7 @@ async function closePullRequest(body, env) {
   });
 }
 
-async function mergePullRequest(body, env) {
+async function mergePullRequest(body, env, targetRepo) {
   const number = positiveInteger(body.number, "number");
   if (!number.ok) return number;
 
@@ -552,10 +570,10 @@ async function mergePullRequest(body, env) {
   const message = boundedText(body.message ?? body.commit_message ?? "", "message", 8192);
   if (!message.ok) return message;
 
-  const pullRequest = await fetchGitHubJson(`/repos/${TARGET_REPO}/pulls/${number.value}`, env);
+  const pullRequest = await fetchGitHubJson(`/repos/${targetRepo}/pulls/${number.value}`, env);
   if (!pullRequest.ok) return pullRequest;
 
-  const guard = validateMergeTarget(pullRequest.payload);
+  const guard = validateMergeTarget(pullRequest.payload, targetRepo);
   if (!guard.ok) return guard;
 
   const headSha = pullRequest.payload?.head?.sha;
@@ -570,7 +588,7 @@ async function mergePullRequest(body, env) {
     ...(expectedHeadSha.value ? { sha: expectedHeadSha.value } : {})
   };
 
-  const merged = await fetchGitHubJson(`/repos/${TARGET_REPO}/pulls/${number.value}/merge`, env, {
+  const merged = await fetchGitHubJson(`/repos/${targetRepo}/pulls/${number.value}/merge`, env, {
     method: "PUT",
     body: mergeBody
   });
@@ -586,6 +604,7 @@ async function mergePullRequest(body, env) {
       sha: merged.payload?.sha ?? null,
       message: merged.payload?.message ?? "Pull request merged.",
       html_url: pullRequest.payload?.html_url ?? null,
+      repository: targetRepo,
       base: TARGET_DEFAULT_BRANCH,
       head: {
         ref: pullRequest.payload?.head?.ref,
@@ -595,12 +614,12 @@ async function mergePullRequest(body, env) {
   };
 }
 
-async function deleteAgentBranch(body, env) {
+async function deleteAgentBranch(body, env, targetRepo) {
   const branch = validateAgentBranch(body.branch);
   if (!branch.ok) return branch;
 
   const refPath = `heads/${encodeRepoPath(branch.value)}`;
-  const deleted = await fetchGitHubJson(`/repos/${TARGET_REPO}/git/refs/${refPath}`, env, {
+  const deleted = await fetchGitHubJson(`/repos/${targetRepo}/git/refs/${refPath}`, env, {
     method: "DELETE"
   });
   if (!deleted.ok) return deleted;
@@ -610,6 +629,7 @@ async function deleteAgentBranch(body, env) {
     status: 200,
     payload: {
       deleted: true,
+      repository: targetRepo,
       branch: branch.value,
       ref: `refs/heads/${branch.value}`
     }
@@ -679,6 +699,27 @@ function permissionLabel(permissions = {}) {
   if (permissions?.triage) return "TRIAGE";
   if (permissions?.pull) return "READ";
   return "UNKNOWN";
+}
+
+function targetRepoFromQuery(url) {
+  return resolveTargetRepo(url.searchParams.get("repo"));
+}
+
+function resolveTargetRepo(value) {
+  if (value === undefined || value === null || value === "") {
+    return { ok: true, value: TARGET_REPO };
+  }
+
+  if (typeof value !== "string") {
+    return validationError("repo", `repo must be one of: ${ALLOWED_TARGET_REPOS.join(", ")}.`);
+  }
+
+  const repo = value.trim();
+  if (!ALLOWED_TARGET_REPOS.includes(repo)) {
+    return validationError("repo", `repo must be one of: ${ALLOWED_TARGET_REPOS.join(", ")}.`);
+  }
+
+  return { ok: true, value: repo };
 }
 
 function positiveInteger(value, field) {
@@ -798,7 +839,7 @@ function validateRepositoryPath(value) {
   return { ok: true, value: path };
 }
 
-function validateMergeTarget(pullRequest) {
+function validateMergeTarget(pullRequest, targetRepo) {
   if (!pullRequest || typeof pullRequest !== "object") {
     return validationError("number", "Pull request metadata could not be validated.");
   }
@@ -811,12 +852,12 @@ function validateMergeTarget(pullRequest) {
     return validationError("number", "Draft pull requests cannot be merged by this broker.");
   }
 
-  if (pullRequest.base?.ref !== TARGET_DEFAULT_BRANCH || pullRequest.base?.repo?.full_name !== TARGET_REPO) {
-    return validationError("base", `Only pull requests targeting ${TARGET_REPO}:${TARGET_DEFAULT_BRANCH} can be merged by this broker.`);
+  if (pullRequest.base?.ref !== TARGET_DEFAULT_BRANCH || pullRequest.base?.repo?.full_name !== targetRepo) {
+    return validationError("base", `Only pull requests targeting ${targetRepo}:${TARGET_DEFAULT_BRANCH} can be merged by this broker.`);
   }
 
-  if (pullRequest.head?.repo?.full_name !== TARGET_REPO) {
-    return validationError("head", `Only ${TARGET_REPO} head branches can be merged by this broker.`);
+  if (pullRequest.head?.repo?.full_name !== targetRepo) {
+    return validationError("head", `Only ${targetRepo} head branches can be merged by this broker.`);
   }
 
   const headRef = pullRequest.head?.ref;
@@ -1186,7 +1227,7 @@ function renderDashboard({ env = {}, sessionQueryToken = null } = {}) {
   <body>
     <header>
       <h1>${escapeHtml(SERVICE_NAME)}</h1>
-      <p>Session-protected workbench portal for <a href="https://github.com/${TARGET_REPO}">${TARGET_REPO}</a>. It exposes fixed GitHub read endpoints and narrow write endpoints for agent branches, including guarded agent PR merges; shell execution and privileged repository administration are not exposed.</p>
+      <p>Session-protected workbench portal for ${ALLOWED_TARGET_REPOS.map((repo) => `<a href="https://github.com/${repo}">${repo}</a>`).join(" and ")}. It exposes fixed GitHub read endpoints and narrow write endpoints for agent branches, including guarded agent PR merges; shell execution and privileged repository administration are not exposed.</p>
     </header>
     <main>
       <div class="stack">
@@ -1247,7 +1288,7 @@ function renderDashboard({ env = {}, sessionQueryToken = null } = {}) {
           <h2 id="repos-heading">Repositories</h2>
           <ul>
             <li><a href="https://github.com/${PROJECT_REPO}">${PROJECT_REPO}</a> project repo</li>
-            <li><a href="https://github.com/${TARGET_REPO}">${TARGET_REPO}</a> target repo</li>
+            ${ALLOWED_TARGET_REPOS.map((repo) => `<li><a href="https://github.com/${repo}">${repo}</a> allowlisted target repo</li>`).join("\n            ")}
           </ul>
         </section>
       </aside>

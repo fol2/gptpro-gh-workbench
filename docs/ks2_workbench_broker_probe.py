@@ -93,8 +93,24 @@ def resolve_session_url(args: argparse.Namespace, environ: dict[str, str] | None
 def build_url(config: ProbeConfig, path: str) -> str:
     url = f"{config.base_url.rstrip('/')}{path}"
     if config.session_query:
-        return f"{url}?{config.session_query}"
+        separator = "&" if "?" in url else "?"
+        return f"{url}{separator}{config.session_query}"
     return url
+
+
+def endpoint_with_repo(endpoint: str, target_repo: str | None) -> str:
+    if not target_repo or not endpoint.startswith("/api/github/"):
+        return endpoint
+
+    separator = "&" if "?" in endpoint else "?"
+    return f"{endpoint}{separator}{urlencode({'repo': target_repo})}"
+
+
+def body_with_repo(body: dict[str, object], target_repo: str | None) -> dict[str, object]:
+    if not target_repo:
+        return body
+
+    return {**body, "repo": target_repo}
 
 
 def request_json(
@@ -229,6 +245,7 @@ def redact_payload(payload: object) -> object:
 def run_read_probe(
     config: ProbeConfig,
     *,
+    target_repo: str | None = None,
     timeout: float = 15,
     transport=urlopen,
 ) -> dict[str, object]:
@@ -236,7 +253,8 @@ def run_read_probe(
     payloads = {}
 
     for endpoint in READ_ENDPOINTS:
-        check = request_json(config, "GET", endpoint, timeout=timeout, transport=transport)
+        request_endpoint = endpoint_with_repo(endpoint, target_repo)
+        check = request_json(config, "GET", request_endpoint, timeout=timeout, transport=transport)
         checks.append(summarise_check(check))
         if not check["ok"]:
             return {
@@ -244,6 +262,7 @@ def run_read_probe(
                 "classification": check["classification"],
                 "message": f"{check['message']} This is a client path or broker readiness blocker.",
                 "session_url": config.redacted_url,
+                "target_repo": target_repo,
                 "checks": checks,
             }
         payloads[endpoint] = check.get("payload", {})
@@ -267,6 +286,7 @@ def run_read_probe(
 def run_write_smoke(
     config: ProbeConfig,
     *,
+    target_repo: str | None = None,
     branch_name: str | None = None,
     timeout: float = 15,
     transport=urlopen,
@@ -281,58 +301,58 @@ def run_write_smoke(
     branch_result = post_json(
         config,
         "/api/github/branches",
-        {"branch": branch},
+        body_with_repo({"branch": branch}, target_repo),
         timeout=timeout,
         transport=transport,
     )
     checks.append(summarise_check(branch_result))
     if not branch_result["ok"]:
-        return write_smoke_failure(config, branch, smoke_path, pull_request, cleanup, checks)
+        return write_smoke_failure(config, branch, smoke_path, pull_request, cleanup, checks, target_repo)
     branch_created = True
 
     file_result = post_json(
         config,
         "/api/github/files",
-        {
+        body_with_repo({
             "branch": branch,
             "path": smoke_path,
             "content": "workbench smoke\n",
             "message": "Add workbench smoke file",
-        },
+        }, target_repo),
         timeout=timeout,
         transport=transport,
     )
     checks.append(summarise_check(file_result))
     if not file_result["ok"]:
-        cleanup = cleanup_smoke(config, branch, pull_request, branch_created, cleanup, checks, timeout, transport)
-        return write_smoke_failure(config, branch, smoke_path, pull_request, cleanup, checks)
+        cleanup = cleanup_smoke(config, branch, pull_request, branch_created, cleanup, checks, timeout, transport, target_repo)
+        return write_smoke_failure(config, branch, smoke_path, pull_request, cleanup, checks, target_repo)
 
     pr_result = post_json(
         config,
         "/api/github/pulls",
-        {
+        body_with_repo({
             "branch": branch,
             "title": "Workbench broker smoke",
             "body": "Temporary broker write smoke. The probe will close this PR and delete the branch.",
-        },
+        }, target_repo),
         timeout=timeout,
         transport=transport,
     )
     checks.append(summarise_check(pr_result))
     if not pr_result["ok"]:
-        cleanup = cleanup_smoke(config, branch, pull_request, branch_created, cleanup, checks, timeout, transport)
-        return write_smoke_failure(config, branch, smoke_path, pull_request, cleanup, checks)
+        cleanup = cleanup_smoke(config, branch, pull_request, branch_created, cleanup, checks, timeout, transport, target_repo)
+        return write_smoke_failure(config, branch, smoke_path, pull_request, cleanup, checks, target_repo)
 
     pr_payload = pr_result.get("payload", {})
     if not isinstance(pr_payload, dict) or not isinstance(pr_payload.get("number"), int):
-        cleanup = cleanup_smoke(config, branch, pull_request, branch_created, cleanup, checks, timeout, transport)
-        return write_smoke_failure(config, branch, smoke_path, pull_request, cleanup, checks)
+        cleanup = cleanup_smoke(config, branch, pull_request, branch_created, cleanup, checks, timeout, transport, target_repo)
+        return write_smoke_failure(config, branch, smoke_path, pull_request, cleanup, checks, target_repo)
 
     pull_request = {
         "number": pr_payload["number"],
         "url": pr_payload.get("html_url"),
     }
-    cleanup = cleanup_smoke(config, branch, pull_request, branch_created, cleanup, checks, timeout, transport)
+    cleanup = cleanup_smoke(config, branch, pull_request, branch_created, cleanup, checks, timeout, transport, target_repo)
 
     if cleanup["manual_cleanup"]:
         return {
@@ -340,6 +360,7 @@ def run_write_smoke(
             "classification": "write_smoke_cleanup_partial",
             "message": "Write smoke created broker artefacts, but cleanup was partial.",
             "session_url": config.redacted_url,
+            "target_repo": target_repo,
             "branch": branch,
             "path": smoke_path,
             "pull_request": pull_request,
@@ -352,6 +373,7 @@ def run_write_smoke(
         "classification": "write_smoke_cleaned_up",
         "message": "Write smoke created and cleaned up the temporary PR and branch.",
         "session_url": config.redacted_url,
+        "target_repo": target_repo,
         "branch": branch,
         "path": smoke_path,
         "pull_request": pull_request,
@@ -375,6 +397,7 @@ def run_merge_pr(
     config: ProbeConfig,
     *,
     number: int,
+    target_repo: str | None = None,
     expected_head_sha: str | None = None,
     title: str | None = None,
     message: str | None = None,
@@ -382,6 +405,7 @@ def run_merge_pr(
     transport=urlopen,
 ) -> dict[str, object]:
     body: dict[str, object] = {"number": number}
+    body = body_with_repo(body, target_repo)
     if expected_head_sha:
         body["expectedHeadSha"] = expected_head_sha
     if title:
@@ -403,6 +427,7 @@ def run_merge_pr(
             "classification": "merge_failed",
             "message": "Broker merge request failed.",
             "session_url": config.redacted_url,
+            "target_repo": target_repo,
             "pull_request": {"number": number},
             "checks": checks,
             "payload": merge_result.get("payload", {}),
@@ -417,6 +442,7 @@ def run_merge_pr(
         "classification": "merge_completed",
         "message": "Broker merge completed.",
         "session_url": config.redacted_url,
+        "target_repo": payload.get("repository") or target_repo,
         "pull_request": {
             "number": number,
             "url": payload.get("html_url"),
@@ -436,12 +462,13 @@ def cleanup_smoke(
     checks: list[dict[str, object]],
     timeout: float,
     transport,
+    target_repo: str | None = None,
 ) -> dict[str, object]:
     if pull_request and isinstance(pull_request.get("number"), int):
         close_result = post_json(
             config,
             "/api/github/pulls/close",
-            {"number": pull_request["number"]},
+            body_with_repo({"number": pull_request["number"]}, target_repo),
             timeout=timeout,
             transport=transport,
         )
@@ -454,7 +481,7 @@ def cleanup_smoke(
         delete_result = post_json(
             config,
             "/api/github/branches/delete",
-            {"branch": branch},
+            body_with_repo({"branch": branch}, target_repo),
             timeout=timeout,
             transport=transport,
         )
@@ -473,6 +500,7 @@ def write_smoke_failure(
     pull_request: dict[str, object] | None,
     cleanup: dict[str, object],
     checks: list[dict[str, object]],
+    target_repo: str | None = None,
 ) -> dict[str, object]:
     cleanup_attempted = cleanup["pr_closed"] is not None or cleanup["branch_deleted"] is not None
     return {
@@ -480,6 +508,7 @@ def write_smoke_failure(
         "classification": "write_smoke_failed_cleanup_attempted" if cleanup_attempted else "write_smoke_failed",
         "message": "Write smoke failed before completion.",
         "session_url": config.redacted_url,
+        "target_repo": target_repo,
         "branch": branch,
         "path": smoke_path,
         "pull_request": pull_request,
@@ -534,6 +563,7 @@ def build_parser() -> argparse.ArgumentParser:
         help="File containing a signed workbench session URL.",
     )
     parser.add_argument("--timeout", type=float, default=15, help="HTTP timeout in seconds.")
+    parser.add_argument("--repo", help="Allowed target repo. Defaults to the broker default target.")
     parser.add_argument("--json", action="store_true", help="Print machine-readable JSON.")
     action = parser.add_mutually_exclusive_group()
     action.add_argument("--write-smoke", action="store_true", help="Run an opt-in branch/file/PR write smoke.")
@@ -558,13 +588,13 @@ def main(argv: list[str] | None = None) -> int:
             "checks": [],
         }
     else:
-        result = run_read_probe(config, timeout=args.timeout)
+        result = run_read_probe(config, target_repo=args.repo, timeout=args.timeout)
         if result["ok"] and args.write_smoke:
             read_probe = {
                 "classification": result["classification"],
                 "checks": result["checks"],
             }
-            result = run_write_smoke(config, timeout=args.timeout)
+            result = run_write_smoke(config, target_repo=args.repo, timeout=args.timeout)
             result["read_probe"] = read_probe
         elif result["ok"] and args.merge_pr:
             read_probe = {
@@ -574,6 +604,7 @@ def main(argv: list[str] | None = None) -> int:
             result = run_merge_pr(
                 config,
                 number=args.merge_pr,
+                target_repo=args.repo,
                 expected_head_sha=args.expected_head_sha,
                 title=args.merge_title,
                 message=args.merge_message,
