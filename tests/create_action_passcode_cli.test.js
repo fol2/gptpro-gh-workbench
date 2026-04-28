@@ -14,8 +14,8 @@ test("passcode CLI parses repo positional with safe defaults", () => {
   assert.equal(options.write, true);
   assert.equal(options.merge, false);
   assert.equal(options.ttlSeconds, 600);
-  assert.equal(options.sessionTtlSeconds, 1800);
-  assert.equal(options.maxRequests, 50);
+  assert.equal(options.sessionTtlSeconds, 18000);
+  assert.equal(options.maxRequests, 500);
 });
 
 test("passcode CLI supports optional repo and scope flags", () => {

@@ -16,8 +16,8 @@ const WORKBENCH_SESSION_HEADER = "X-Workbench-Session";
 const WRITE_READY_PERMISSIONS = new Set(["ADMIN", "MAINTAIN", "WRITE"]);
 const ACTION_KV_BINDING = "WORKBENCH_ACTION_KV";
 const ACTION_PASSCODE_TTL_SECONDS = 600;
-const ACTION_SESSION_TTL_SECONDS = 1800;
-const ACTION_SESSION_MAX_REQUESTS = 50;
+const ACTION_SESSION_TTL_SECONDS = 18_000;
+const ACTION_SESSION_MAX_REQUESTS = 500;
 const ACTION_SESSION_BODY_FIELD = "actionSession";
 const ACTION_PASSCODE_PREFIX = "WB";
 const ACTION_SESSION_PREFIX = "as";
@@ -488,7 +488,7 @@ async function handleActionPasscodeCreateRequest(request, env) {
     "sessionTtlSeconds",
     ACTION_SESSION_TTL_SECONDS,
     60,
-    3600
+    18_000
   );
   if (!sessionTtlSeconds.ok) return jsonResponse(sessionTtlSeconds.payload, sessionTtlSeconds.status, { cors: true });
 
@@ -497,7 +497,7 @@ async function handleActionPasscodeCreateRequest(request, env) {
     "maxRequests",
     ACTION_SESSION_MAX_REQUESTS,
     1,
-    100
+    500
   );
   if (!maxRequests.ok) return jsonResponse(maxRequests.payload, maxRequests.status, { cors: true });
 
