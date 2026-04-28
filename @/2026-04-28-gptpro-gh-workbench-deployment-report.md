@@ -10,14 +10,14 @@ Signed session URL storage: `~/.config/gptpro-gh-workbench/session-url.txt`
 
 The GPTPro GitHub Workbench project has been created as a separate public GitHub repository under `fol2`, implemented as a session-protected Cloudflare Worker portal, reviewed through independent SDLC gates, merged to remote `main`, deployed through a Cloudflare Workers route, and live-smoked at a public URL.
 
-This report now includes the follow-up GitHub write-broker slice. Before the write-broker PR is merged and deployed, the public URL should still be treated as the previously live read-only portal. After merge and deployment, the intended live surface is deliberately conservative but no longer merely read-only: it lets ChatGPT or a human inspect a constrained status dashboard, call fixed GitHub read endpoints for `fol2/ks2-mastery`, and use a small set of session-protected GitHub write endpoints backed by a Worker secret `GH_TOKEN`. It does not accept GitHub tokens from callers, does not return tokens, does not run shell commands, does not expose arbitrary URL proxying, does not connect a private executor, and does not provide merge, workflow, admin, secret, or direct-main-write operations.
+The follow-up GitHub write-broker slice is now merged, deployed, and live-smoked. The live surface is deliberately conservative but no longer merely read-only: it lets ChatGPT or a human inspect a constrained status dashboard, call fixed GitHub read endpoints for `fol2/ks2-mastery`, and use a small set of session-protected GitHub write endpoints backed by a Worker secret `GH_TOKEN`. It does not accept GitHub tokens from callers, does not return tokens, does not run shell commands, does not expose arbitrary URL proxying, does not connect a private executor, and does not provide merge, workflow, admin, secret, or direct-main-write operations.
 
 The first live fallback used a temporary Cloudflare Tunnel while the local Wrangler OAuth session was inactive. After the Cloudflare OAuth approval was completed, the Worker was deployed officially and bound to `gptpro-gh-workbench.eugnel.uk/*` as a Cloudflare Workers route. The tunnel fallback was stopped and the named tunnel was deleted before the final smoke, so the current URL is served by Cloudflare Workers rather than by a local tunnel.
 
 ## What Is Working Now
 
 - The repository exists publicly at `https://github.com/fol2/gptpro-gh-workbench`.
-- Remote `main` contains the portal foundation and secure-cookie hotfix.
+- Remote `main` contains the portal foundation, secure-cookie hotfix, deployment report update, and GitHub write-broker slice.
 - The portal is reachable at `https://gptpro-gh-workbench.eugnel.uk/` through a Cloudflare Workers route.
 - The portal requires a valid workbench session token before dashboard or API data is returned.
 - The signed dashboard sets a `gptpro_workbench_session` cookie with `HttpOnly`, `SameSite=Strict`, and `Secure`.
@@ -71,7 +71,8 @@ The signed session URL is intentionally not committed to the repository. It is s
 - PR #3: secure session cookie hotfix merged to `main`.
   - Merge commit: `fed2b4126527d53b44fdb4d13ebbf5a492c5ba50`
 - PR #4: deployment report and Worker route configuration merged to `main`.
-- PR #5: GitHub write-broker slice, pending merge/deploy at the time this report section was drafted.
+- PR #5: GitHub write-broker slice merged to `main`.
+  - Merge commit: `e6adca4f6f33d32539aec6b81353f0493c962b93`
 
 ## Runtime Architecture
 
@@ -107,23 +108,45 @@ It is no longer required for the public URL, but remains useful if a local fallb
 
 ## Live Smoke Evidence
 
-Latest live-smoke result after the original official Worker route deployment and after stopping the local tunnel/runtime fallback:
+Latest live-smoke result after PR #5 was merged and deployed to Cloudflare Workers version `7b226cca-6906-49b5-864a-c5bd64a1f4a2`:
 
 ```text
 unauthenticated /api/status: 401
 authenticated /api/status: 200
 authenticated /: 200
 authenticated /api/github/repo: 200
+authenticated /api/github/auth: 200
+live write smoke branch/file/PR creation: passed
+smoke PR cleanup: closed PR #491 and deleted agent/workbench-smoke-20260428-1713
 ```
 
 Live `/api/status` returned:
 
 ```json
 {
-  "portal_status": "responding/read-only foundation",
-  "deployment_status": "worker route live-smoked on 2026-04-28T16:20:03Z",
+  "portal_status": "responding/github write broker",
+  "capability_mode": "session-protected github write broker",
+  "deployment_status": "worker route write-broker live-smoked on 2026-04-28T17:12:15Z",
   "access_status": "session required",
+  "auth_write_status": {
+    "enabled": true,
+    "status": "enabled via GH_TOKEN Worker secret"
+  },
   "target_repo": "fol2/ks2-mastery"
+}
+```
+
+Live `/api/github/auth` returned the expected redacted identity and repository permission:
+
+```json
+{
+  "github_user": {
+    "login": "fol2"
+  },
+  "repository": {
+    "full_name": "fol2/ks2-mastery",
+    "viewer_permission": "ADMIN"
+  }
 }
 ```
 
@@ -140,23 +163,13 @@ Live `/api/github/repo` returned the expected target repository identity:
 The signed dashboard response was also checked for:
 
 ```text
-read-only dashboard copy: present
-executor disconnected copy: present
+narrow agent-branch broker copy: present
+executor shell unavailable copy: present
 deployment status copy: present
 signed /api/status link: present
 Set-Cookie Secure: present
 Set-Cookie HttpOnly: present
 Set-Cookie SameSite=Strict: present
-```
-
-Write-broker live-smoke evidence must be refreshed after the write-broker PR is merged and deployed. The expected post-deploy checks are:
-
-```text
-unauthenticated /api/status: 401
-authenticated /api/status: 200
-authenticated /api/github/auth: 200
-authenticated /api/github/repo: 200
-authenticated dashboard contains narrow broker copy
 authenticated responses do not contain GH_TOKEN or token prefixes
 ```
 
@@ -203,11 +216,11 @@ Confirmed boundaries in the current implementation:
 - GitHub upstream failures are not returned as false HTTP 200 success responses.
 - `workers_dev` is disabled in the Worker config.
 
-The main residual exposure is capability-related rather than deployment-related: once this slice is deployed, the Worker can perform constrained GitHub API writes, but it still cannot run local verification, inspect a full checkout, or execute repo-native scripts. Full SDLC automation still needs a private executor behind the portal.
+The main residual exposure is capability-related rather than deployment-related: the Worker can perform constrained GitHub API writes, but it still cannot run local verification, inspect a full checkout, or execute repo-native scripts. Full SDLC automation still needs a private executor behind the portal.
 
 ## GitHub Write Access
 
-Cloudflare deployment is complete for the original portal, and GitHub authentication has been connected through a Worker secret for the write-broker slice.
+Cloudflare deployment is complete, and GitHub authentication is connected through a Worker secret for the write-broker slice.
 
 Cloudflare authentication and GitHub authentication are separate:
 
@@ -247,4 +260,4 @@ The private executor should be responsible for clone/fetch, local diffs, `npm te
 
 ## Bottom Line
 
-The project is real, public, merged, deployed, and reachable through a working Cloudflare Workers URL. The write-broker slice turns that URL into a safe session-protected GitHub workbench broker after merge and deploy: it can prove GitHub auth and perform constrained issue, comment, branch, file, and PR operations against `fol2/ks2-mastery` without exposing a token or shell. The remaining gap is private executor capability for local checkout work and verification.
+The project is real, public, merged, deployed, and reachable through a working Cloudflare Workers URL. The write-broker slice turns that URL into a safe session-protected GitHub workbench broker: it proves GitHub auth and has performed constrained branch, file, and PR operations against `fol2/ks2-mastery` without exposing a token or shell. The remaining gap is private executor capability for local checkout work and verification.
