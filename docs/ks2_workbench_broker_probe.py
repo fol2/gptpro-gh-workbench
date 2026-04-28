@@ -19,6 +19,7 @@ from urllib.request import Request, urlopen
 
 SESSION_URL_ENV = "KS2_WORKBENCH_SESSION_URL"
 DEFAULT_SESSION_URL_FILE = Path.home() / ".config/gptpro-gh-workbench/session-url.txt"
+USER_AGENT = "gptpro-gh-workbench-probe"
 READ_ENDPOINTS = (
     "/api/status",
     "/api/actions",
@@ -106,7 +107,10 @@ def request_json(
     transport=urlopen,
 ) -> dict[str, object]:
     request_body = None
-    headers = {"Accept": "application/json"}
+    headers = {
+        "Accept": "application/json",
+        "User-Agent": USER_AGENT,
+    }
     if body is not None:
         request_body = json.dumps(body).encode("utf-8")
         headers["Content-Type"] = "application/json"

@@ -48,6 +48,7 @@ class BrokerProbeTest(unittest.TestCase):
             parsed = urlparse(request.full_url)
             seen_paths.append(parsed.path)
             self.assertEqual(parse_qs(parsed.query)["session"], ["test-session"])
+            self.assertEqual(request.get_header("User-agent"), "gptpro-gh-workbench-probe")
             payloads = {
                 "/api/status": {
                     "capability_mode": "session-protected github write broker",
