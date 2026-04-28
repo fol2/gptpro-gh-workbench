@@ -1,0 +1,29 @@
+KS2 GitHub access probe — 2026-04-28
+
+Environment commands:
+- git --version -> git version 2.47.3
+- command -v gh -> not found
+- command -v ssh -> not found
+- command -v git-remote-https -> /usr/lib/git-core/git-remote-https
+
+Network/auth commands tried:
+1) GIT_TERMINAL_PROMPT=0 git ls-remote https://github.com/fol2/ks2-mastery.git HEAD
+   Result: fatal: unable to access 'https://github.com/fol2/ks2-mastery.git/': Could not resolve host: github.com
+
+2) GIT_TERMINAL_PROMPT=0 timeout 20 git ls-remote git@github.com:fol2/ks2-mastery.git HEAD
+   Result: error: cannot run ssh: No such file or directory; fatal: unable to fork
+
+3) curl -I --max-time 10 https://github.com
+   Result: curl: (6) Could not resolve host: github.com
+
+4) curl -I -k --max-time 5 https://1.1.1.1
+   Result: curl: (7) Failed to connect to 1.1.1.1 port 443
+
+5) web.run open https://github.com/fol2/ks2-mastery
+   Result: worked; GitHub rendered page visible. Repo is public and shows 831 commits, 0 issues, 0 PRs at test time.
+
+6) web.run open https://raw.githubusercontent.com/fol2/ks2-mastery/main/README.md then container.download same raw URL
+   Result: worked for README.md. This is useful as a selective read-only fallback for known raw text files, not as a full git clone.
+
+7) web.run open GitHub archive ZIP URLs
+   Result: failed; binary archive redirects to codeload and was not safe/openable through web.run, so container.download could not save it.
