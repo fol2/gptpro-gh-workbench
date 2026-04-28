@@ -24,6 +24,18 @@ The broker appears correctly built and deployed as a constrained Cloudflare Work
 - No POST-capable REST connector was exposed to that runtime.
 - Browser-style GET/open checks were available, but arbitrary POST requests for branch/file/PR creation were not.
 
+## Action Connector Update
+
+The repository now defines the intended ChatGPT Pro API connector/action path in `docs/chatgpt-workbench-action.md`.
+
+The action path is not a shell/export workflow and does not expect ChatGPT to install packages. It should call the hosted broker over HTTP, send the workbench session with `X-Workbench-Session: <signed-session-token>`, and start with:
+
+```text
+GET /api/action/readiness
+```
+
+The success condition remains `classification: broker_read_ready`. Any other classification is a stop condition.
+
 ## Current Broker Capability Model
 
 Capable of:
@@ -36,7 +48,7 @@ Capable of:
 - Open a PR from an `agent/...` branch.
 - Close a temporary PR by number.
 - Delete a validated `agent/...` branch for cleanup.
-- Squash-merge an open, non-draft `agent/...` PR into an allowlisted repository's `main` when explicitly called with a PR number and optional expected head SHA.
+- Squash-merge an open, non-draft `agent/...` PR into an allowlisted repository's `main` when explicitly called with a PR number and required expected head SHA.
 
 Not yet capable of:
 
@@ -50,15 +62,21 @@ Not yet capable of:
 
 The next runtime needs exactly one of these client paths:
 
+- Preferably, a ChatGPT Pro API connector/action that can call the hosted broker and hold the workbench session outside model-visible arguments.
 - A signed workbench session URL plus an HTTP client path that can perform `GET` and `POST` requests to the broker.
 - Shell DNS/HTTPS access to `gptpro-gh-workbench.eugnel.uk`, so `curl` or the probe client can call the broker.
-- A platform REST/API connector exposed to the session.
 
 Do not provide a GitHub token to the runtime. The Worker already holds its GitHub credential as a secret. The runtime only needs workbench session capability.
 
 ## Recommended Probe Flow
 
 Run the read-only probe first after exposing a signed workbench session URL through a session-scoped environment variable.
+
+For action-style header auth from a compatible runtime, use:
+
+```bash
+python3 docs/ks2_workbench_broker_probe.py --session-auth header --json
+```
 
 Only run write smoke after the cleanup endpoints are deployed and authenticated. The write smoke should create a temporary PR and branch, then close the PR and delete the branch before reporting success.
 

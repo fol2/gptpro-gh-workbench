@@ -40,6 +40,19 @@ class BrokerProbeTest(unittest.TestCase):
         self.assertNotIn("super-secret-session", config.redacted_url)
         self.assertIn("session=<redacted>", config.redacted_url)
 
+    def test_parse_session_url_can_move_session_to_header_auth(self):
+        probe = load_probe()
+
+        config = probe.parse_session_url(
+            "https://gptpro-gh-workbench.eugnel.uk/?session=super-secret-session",
+            session_auth="header",
+        )
+
+        self.assertEqual(config.base_url, "https://gptpro-gh-workbench.eugnel.uk")
+        self.assertEqual(config.session_query, "")
+        self.assertEqual(config.session_header, "super-secret-session")
+        self.assertNotIn("super-secret-session", config.redacted_url)
+
     def test_read_probe_reports_successful_authenticated_broker(self):
         probe = load_probe()
         config = probe.parse_session_url("https://gptpro-gh-workbench.eugnel.uk/?session=t")
@@ -70,6 +83,37 @@ class BrokerProbeTest(unittest.TestCase):
             ["/api/status", "/api/actions", "/api/github/repo", "/api/github/auth"],
         )
         self.assertNotIn('"t"', json.dumps(result))
+
+    def test_read_probe_can_send_workbench_session_header_without_query_token(self):
+        probe = load_probe()
+        config = probe.parse_session_url(
+            "https://gptpro-gh-workbench.eugnel.uk/?session=header-session",
+            session_auth="header",
+        )
+        seen_queries = []
+
+        def transport(request, timeout):
+            parsed = urlparse(request.full_url)
+            seen_queries.append(parsed.query)
+            self.assertEqual(request.get_header("X-workbench-session"), "header-session")
+            self.assertNotIn("session=", parsed.query)
+            payloads = {
+                "/api/status": {
+                    "capability_mode": "session-protected github write broker",
+                    "target_repo": "fol2/ks2-mastery",
+                },
+                "/api/actions": {"actions": [{"id": "github.write", "status": "enabled"}]},
+                "/api/github/repo": {"full_name": "fol2/ks2-mastery", "default_branch": "main"},
+                "/api/github/auth": {"authenticated": True},
+            }
+            return FakeResponse(200, payloads[parsed.path])
+
+        result = probe.run_read_probe(config, transport=transport)
+
+        self.assertTrue(result["ok"])
+        self.assertEqual(result["classification"], "broker_read_ready")
+        self.assertEqual(seen_queries, ["", "", "", ""])
+        self.assertNotIn("header-session", json.dumps(result))
 
     def test_read_probe_passes_repo_selector_to_github_endpoints(self):
         probe = load_probe()
@@ -283,6 +327,7 @@ class BrokerProbeTest(unittest.TestCase):
             self.assertEqual(body, {
                 "number": 10,
                 "repo": WORKBENCH_REPO,
+                "expectedHeadSha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
             })
             return FakeResponse(200, {
                 "merged": True,
@@ -295,11 +340,30 @@ class BrokerProbeTest(unittest.TestCase):
             config,
             number=10,
             target_repo=WORKBENCH_REPO,
+            expected_head_sha="aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
             transport=transport,
         )
 
         self.assertTrue(result["ok"])
         self.assertEqual(result["target_repo"], WORKBENCH_REPO)
+        self.assertNotIn('"m"', json.dumps(result))
+
+    def test_merge_pr_requires_expected_head_sha_before_request(self):
+        probe = load_probe()
+        config = probe.parse_session_url("https://gptpro-gh-workbench.eugnel.uk/?session=m")
+
+        def transport(request, timeout):
+            raise AssertionError("merge should not be requested without expected_head_sha")
+
+        result = probe.run_merge_pr(
+            config,
+            number=10,
+            transport=transport,
+        )
+
+        self.assertFalse(result["ok"])
+        self.assertEqual(result["classification"], "merge_missing_expected_head_sha")
+        self.assertEqual(result["checks"], [])
         self.assertNotIn('"m"', json.dumps(result))
 
 

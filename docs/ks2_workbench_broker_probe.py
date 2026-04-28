@@ -20,6 +20,7 @@ from urllib.request import Request, urlopen
 SESSION_URL_ENV = "KS2_WORKBENCH_SESSION_URL"
 DEFAULT_SESSION_URL_FILE = Path.home() / ".config/gptpro-gh-workbench/session-url.txt"
 USER_AGENT = "gptpro-gh-workbench-probe"
+WORKBENCH_SESSION_HEADER = "X-Workbench-Session"
 READ_ENDPOINTS = (
     "/api/status",
     "/api/actions",
@@ -33,9 +34,17 @@ class ProbeConfigError(RuntimeError):
 
 
 class ProbeConfig:
-    def __init__(self, *, base_url: str, session_query: str, redacted_url: str):
+    def __init__(
+        self,
+        *,
+        base_url: str,
+        session_query: str,
+        session_header: str | None,
+        redacted_url: str,
+    ):
         self.base_url = base_url
         self.session_query = session_query
+        self.session_header = session_header
         self.redacted_url = redacted_url
 
 
@@ -44,6 +53,8 @@ def redact_text(value: object) -> str:
     replacements = (
         (r"session=[^&#\s]+", "session=<redacted>"),
         (r"gptpro_workbench_session=[^;\s]+", "gptpro_workbench_session=<redacted>"),
+        (r"X-Workbench-Session:\s*[^,\s]+", "X-Workbench-Session: <redacted>"),
+        (r'"X-Workbench-Session"\s*:\s*"[^"]+"', '"X-Workbench-Session": "<redacted>"'),
         (r"github_pat_[A-Za-z0-9_]+", "github_pat_<redacted>"),
         (r"ghp_[A-Za-z0-9_]+", "ghp_<redacted>"),
         (r"Bearer\s+[A-Za-z0-9._~+/=-]{12,}", "Bearer <redacted>"),
@@ -53,7 +64,7 @@ def redact_text(value: object) -> str:
     return text
 
 
-def parse_session_url(raw_url: str) -> ProbeConfig:
+def parse_session_url(raw_url: str, *, session_auth: str = "query") -> ProbeConfig:
     candidate = raw_url.strip()
     parsed = urlparse(candidate)
     if parsed.scheme not in {"http", "https"} or not parsed.netloc:
@@ -64,11 +75,17 @@ def parse_session_url(raw_url: str) -> ProbeConfig:
         for key, value in parse_qsl(parsed.query, keep_blank_values=True)
         if key == "session" and value
     ]
-    session_query = urlencode(session_values[:1])
+    if session_auth not in {"query", "header"}:
+        raise ProbeConfigError("Session auth mode must be query or header.")
+
+    session_token = session_values[0][1] if session_values else None
+    session_query = urlencode(session_values[:1]) if session_auth == "query" else ""
+    session_header = session_token if session_auth == "header" else None
 
     return ProbeConfig(
         base_url=f"{parsed.scheme}://{parsed.netloc}",
         session_query=session_query,
+        session_header=session_header,
         redacted_url=redact_text(candidate),
     )
 
@@ -127,6 +144,8 @@ def request_json(
         "Accept": "application/json",
         "User-Agent": USER_AGENT,
     }
+    if config.session_header:
+        headers[WORKBENCH_SESSION_HEADER] = config.session_header
     if body is not None:
         request_body = json.dumps(body).encode("utf-8")
         headers["Content-Type"] = "application/json"
@@ -404,10 +423,20 @@ def run_merge_pr(
     timeout: float = 15,
     transport=urlopen,
 ) -> dict[str, object]:
+    if not expected_head_sha:
+        return {
+            "ok": False,
+            "classification": "merge_missing_expected_head_sha",
+            "message": "expected_head_sha is required for guarded broker merges.",
+            "session_url": config.redacted_url,
+            "target_repo": target_repo,
+            "pull_request": {"number": number},
+            "checks": [],
+        }
+
     body: dict[str, object] = {"number": number}
     body = body_with_repo(body, target_repo)
-    if expected_head_sha:
-        body["expectedHeadSha"] = expected_head_sha
+    body["expectedHeadSha"] = expected_head_sha
     if title:
         body["title"] = title
     if message:
@@ -564,11 +593,17 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--timeout", type=float, default=15, help="HTTP timeout in seconds.")
     parser.add_argument("--repo", help="Allowed target repo. Defaults to the broker default target.")
+    parser.add_argument(
+        "--session-auth",
+        choices=("query", "header"),
+        default="query",
+        help="Send the workbench session as the URL query parameter or X-Workbench-Session header.",
+    )
     parser.add_argument("--json", action="store_true", help="Print machine-readable JSON.")
     action = parser.add_mutually_exclusive_group()
     action.add_argument("--write-smoke", action="store_true", help="Run an opt-in branch/file/PR write smoke.")
     action.add_argument("--merge-pr", type=int, help="Squash-merge one guarded agent PR by number.")
-    parser.add_argument("--expected-head-sha", help="Optional 40-character head SHA guard for --merge-pr.")
+    parser.add_argument("--expected-head-sha", help="Required 40-character head SHA guard for --merge-pr.")
     parser.add_argument("--merge-title", help="Optional commit title for --merge-pr.")
     parser.add_argument("--merge-message", help="Optional commit message for --merge-pr.")
     return parser
@@ -579,7 +614,7 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
 
     try:
-        config = parse_session_url(resolve_session_url(args))
+        config = parse_session_url(resolve_session_url(args), session_auth=args.session_auth)
     except ProbeConfigError as error:
         result = {
             "ok": False,

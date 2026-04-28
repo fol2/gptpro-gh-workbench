@@ -85,7 +85,21 @@ python3 docs/ks2_workbench_broker_probe.py --write-smoke --json
 
 ## What needs to change
 
-For this exact environment, inject a session-scoped variable and make the shell route resolve the broker domain:
+The preferred fix is now the ChatGPT Pro API connector/action path described in `docs/chatgpt-workbench-action.md`. The action should hold the workbench session outside prompt-visible arguments, call the hosted broker over HTTP, and send:
+
+```text
+X-Workbench-Session: <signed-session-token>
+```
+
+The first action call should be:
+
+```text
+GET /api/action/readiness
+```
+
+If it does not return `broker_read_ready`, stop.
+
+For shell fallback in this exact environment, inject a session-scoped variable and make the shell route resolve the broker domain:
 
 ```bash
 export KS2_WORKBENCH_SESSION_URL='https://gptpro-gh-workbench.eugnel.uk/?session=...'
@@ -99,8 +113,14 @@ python3 -S docs/ks2_workbench_broker_probe.py --json
 
 The `-S` flag is only a workaround for this container's current Python site-startup hang.
 
+To test the action-style header path from a runtime that can already reach the broker:
+
+```bash
+python3 -S docs/ks2_workbench_broker_probe.py --session-auth header --json
+```
+
 ## Verdict
 
-Not broker-ready from this runtime yet.
+Not broker-ready from this runtime yet. The durable route is a ChatGPT Pro API connector/action, not another export-only shell workflow.
 
 Classification: `missing_session_url` plus `dns_failure` on the shell client path.
