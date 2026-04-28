@@ -38,6 +38,8 @@ test("dashboard is browser-readable and states executor is disconnected", async 
   assert.match(html, /fol2\/ks2-mastery/);
   assert.match(response.headers.get("set-cookie") ?? "", /gptpro_workbench_session=test-session/);
   assert.match(response.headers.get("set-cookie") ?? "", /HttpOnly/);
+  assert.match(response.headers.get("set-cookie") ?? "", /SameSite=Strict/);
+  assert.match(response.headers.get("set-cookie") ?? "", /Secure/);
 });
 
 test("actions endpoint marks writes and executor actions disabled", async () => {
