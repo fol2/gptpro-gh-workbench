@@ -60,6 +60,11 @@ test("runtime report distinguishes deployed broker capability from runtime opera
   assert.match(readme, /--repo fol2\/gptpro-gh-workbench/);
   assert.match(readme, /open, non-draft `agent\/\.\.\.` pull requests/i);
   assert.match(readme, /There is no arbitrary URL fetch, generic proxy, shell execution/i);
+  assert.match(readme, /GET \/api\/get\/github\/file/);
+  assert.match(readme, /npm run get-passcode -- fol2\/private-repo/);
+  assert.match(readme, /default tier is `standard`/);
+  assert.match(readme, /`standard` allows 10 GET reads for 600 minutes/);
+  assert.match(readme, /`single` allows 1 GET read for 10 minutes/);
 });
 
 test("action documentation defines the ChatGPT Pro API connector path", async () => {
@@ -77,6 +82,10 @@ test("action documentation defines the ChatGPT Pro API connector path", async ()
   assert.match(actionDoc, /does not install packages/i);
   assert.match(actionDoc, /must stop rather than retrying with broader authority/i);
   assert.doesNotMatch(actionDoc, /MCP/i);
+  assert.match(actionDoc, /GET-only setup when ChatGPT cannot POST/i);
+  assert.match(actionDoc, /Omitting `--tier` uses the default `standard` tier/i);
+  assert.match(actionDoc, /GET \/api\/get\/github\/file/);
+  assert.match(actionDoc, /readPasscode=<get-read-passcode>/);
   assert.match(readme, /GET \/api\/action\/readiness/);
   assert.match(readme, /--session-auth header/);
   assert.match(retryReport, /not another export-only shell workflow/i);

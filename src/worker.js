@@ -21,9 +21,25 @@ const ACTION_SESSION_MAX_REQUESTS = 500;
 const ACTION_SESSION_BODY_FIELD = "actionSession";
 const ACTION_PASSCODE_PREFIX = "WB";
 const ACTION_SESSION_PREFIX = "as";
+const GET_READ_PASSCODE_QUERY_PARAM = "readPasscode";
+const DEFAULT_GET_READ_PASSCODE_TIER = "standard";
+const GET_READ_PASSCODE_TIERS = Object.freeze({
+  standard: Object.freeze({
+    ttlSeconds: 36_000,
+    maxRequests: 10
+  }),
+  single: Object.freeze({
+    ttlSeconds: 600,
+    maxRequests: 1
+  })
+});
 
 const READ_ENDPOINTS = [
   "/api/action/readiness",
+  "/api/get/github/repo?repo=fol2/ks2-mastery",
+  "/api/get/github/tree?repo=fol2/ks2-mastery&ref=main",
+  "/api/get/github/file?repo=fol2/ks2-mastery&ref=main&path=README.md",
+  "/api/get/github/pr-diff?repo=fol2/ks2-mastery&number=1",
   "/api/status",
   "/api/github/auth",
   "/api/github/repo",
@@ -34,6 +50,7 @@ const READ_ENDPOINTS = [
 
 const WRITE_ENDPOINTS = [
   "POST /api/action/passcodes",
+  "POST /api/action/read-passcodes",
   "POST /api/action/exchange",
   "POST /api/action/readiness",
   "POST /api/action/status",
@@ -74,6 +91,16 @@ function buildActions(env = {}) {
       : `${ACTION_KV_BINDING} is not configured.`
   },
   {
+    id: "workbench.get.read_passcode.create",
+    label: "Create a limited-use GET read passcode",
+    status: hasActionStore(env) ? "enabled" : "disabled",
+    method: "POST",
+    endpoint: "/api/action/read-passcodes",
+    reason: hasActionStore(env)
+      ? "Creates repo-bound GET read passcodes for private repository reads when ChatGPT cannot POST."
+      : `${ACTION_KV_BINDING} is not configured.`
+  },
+  {
     id: "workbench.action.exchange",
     label: "Exchange a one-time passcode for a short-lived action session",
     status: hasActionStore(env) ? "enabled" : "disabled",
@@ -82,6 +109,14 @@ function buildActions(env = {}) {
     reason: hasActionStore(env)
       ? "Allows ChatGPT API actions to carry actionSession in JSON bodies without seeing the workbench session token."
       : `${ACTION_KV_BINDING} is not configured.`
+  },
+  {
+    id: "github.get.read",
+    label: "Read public repository data through GET-only endpoints",
+    status: "enabled",
+    method: "GET",
+    endpoint: "/api/get/github/*",
+    reason: "Public repositories need no passcode; private reads require a repo-bound GET read passcode."
   },
   {
     id: "github.repo.read",
@@ -189,6 +224,10 @@ export async function handleRequest(request, env = {}, ctx = {}) {
     return handleActionExchangeRequest(request, env);
   }
 
+  if (request.method === "GET" && isGetOnlyReadPath(url.pathname)) {
+    return handleGetOnlyReadRequest(url, env);
+  }
+
   const session = getSessionContext(request, env);
   if (!session.valid) {
     if (request.method === "POST" && isActionSessionBodyPath(url.pathname)) {
@@ -210,6 +249,10 @@ export async function handleRequest(request, env = {}, ctx = {}) {
   if (request.method === "POST") {
     if (url.pathname === "/api/action/passcodes") {
       return handleActionPasscodeCreateRequest(request, env);
+    }
+
+    if (url.pathname === "/api/action/read-passcodes") {
+      return handleGetReadPasscodeCreateRequest(request, env);
     }
 
     if (isActionReadPostPath(url.pathname)) {
@@ -455,6 +498,188 @@ async function buildGitHubAuthStatus(env, targetRepo = TARGET_REPO) {
       }
     }
   };
+}
+
+async function handleGetOnlyReadRequest(url, env) {
+  const passcode = url.searchParams.get(GET_READ_PASSCODE_QUERY_PARAM) || url.searchParams.get("passcode");
+  let targetRepo;
+  let useToken = false;
+
+  if (passcode) {
+    const passcodeResult = await consumeGetReadPasscode(passcode, env, url.searchParams.get("repo"));
+    if (!passcodeResult.ok) {
+      return jsonResponse(passcodeResult.payload, passcodeResult.status, { cors: true });
+    }
+    targetRepo = { ok: true, value: passcodeResult.repo };
+    useToken = true;
+  } else {
+    targetRepo = resolveReadableRepo(url.searchParams.get("repo"));
+    if (!targetRepo.ok) {
+      return jsonResponse(targetRepo.payload, targetRepo.status, { cors: true });
+    }
+  }
+
+  if (url.pathname === "/api/get/github/repo") {
+    return githubResponse(await fetchGitHubJson(`/repos/${targetRepo.value}`, env, { auth: useToken }));
+  }
+
+  if (url.pathname === "/api/get/github/prs") {
+    const limit = parseLimit(url.searchParams.get("limit"));
+    return githubResponse(await fetchGitHubJson(
+      `/repos/${targetRepo.value}/pulls?state=open&per_page=${limit}`,
+      env,
+      { auth: useToken }
+    ));
+  }
+
+  if (url.pathname === "/api/get/github/issues") {
+    const limit = parseLimit(url.searchParams.get("limit"));
+    const result = await fetchGitHubJson(
+      `/repos/${targetRepo.value}/issues?state=open&per_page=${limit}`,
+      env,
+      { auth: useToken }
+    );
+    if (!result.ok) {
+      return githubResponse(result);
+    }
+
+    const issues = result.payload;
+    return jsonResponse(Array.isArray(issues) ? issues.filter((issue) => !issue.pull_request) : issues, 200, { cors: true });
+  }
+
+  if (url.pathname === "/api/get/github/tree") {
+    const ref = validateReadRef(url.searchParams.get("ref"));
+    if (!ref.ok) return jsonResponse(ref.payload, ref.status, { cors: true });
+
+    const path = optionalRepositoryPath(url.searchParams.get("path"));
+    if (!path.ok) return jsonResponse(path.payload, path.status, { cors: true });
+
+    const suffix = path.value ? `/${encodeRepoPath(path.value)}` : "";
+    const result = await fetchGitHubJson(
+      `/repos/${targetRepo.value}/contents${suffix}?ref=${encodeURIComponent(ref.value)}`,
+      env,
+      { auth: useToken }
+    );
+    if (!result.ok) {
+      return githubResponse(result);
+    }
+
+    return jsonResponse(normaliseContentsListing(result.payload, targetRepo.value, ref.value, path.value), 200, { cors: true });
+  }
+
+  if (url.pathname === "/api/get/github/file") {
+    const ref = validateReadRef(url.searchParams.get("ref"));
+    if (!ref.ok) return jsonResponse(ref.payload, ref.status, { cors: true });
+
+    const path = validateRepositoryPath(url.searchParams.get("path"));
+    if (!path.ok) return jsonResponse(path.payload, path.status, { cors: true });
+
+    const result = await fetchGitHubJson(
+      `/repos/${targetRepo.value}/contents/${encodeRepoPath(path.value)}?ref=${encodeURIComponent(ref.value)}`,
+      env,
+      { auth: useToken }
+    );
+    if (!result.ok) {
+      return githubResponse(result);
+    }
+
+    const file = normaliseFilePayload(result.payload, targetRepo.value, ref.value);
+    return jsonResponse(file.payload, file.status, { cors: true });
+  }
+
+  if (url.pathname === "/api/get/github/pr-diff") {
+    const number = positiveInteger(url.searchParams.get("number"), "number");
+    if (!number.ok) return jsonResponse(number.payload, number.status, { cors: true });
+
+    const result = await fetchGitHubText(`/repos/${targetRepo.value}/pulls/${number.value}`, env, {
+      auth: useToken,
+      headers: {
+        "Accept": "application/vnd.github.v3.diff"
+      }
+    });
+    if (!result.ok) {
+      return githubResponse(result);
+    }
+
+    return jsonResponse({
+      repository: targetRepo.value,
+      number: number.value,
+      truncated: result.truncated,
+      diff: result.payload
+    }, 200, { cors: true });
+  }
+
+  return jsonResponse({
+    error: "not_found",
+    message: "This GET-only read path is not allowlisted."
+  }, 404, { cors: true });
+}
+
+async function handleGetReadPasscodeCreateRequest(request, env) {
+  const bodyResult = await readJsonBody(request);
+  if (!bodyResult.ok) {
+    return jsonResponse(bodyResult.payload, bodyResult.status, { cors: true });
+  }
+
+  const store = getActionStore(env);
+  if (!store) {
+    return githubResponse(actionStoreMissing());
+  }
+
+  const body = bodyResult.payload;
+  const targetRepo = resolveReadableRepo(body.repo);
+  if (!targetRepo.ok) {
+    return jsonResponse(targetRepo.payload, targetRepo.status, { cors: true });
+  }
+
+  if (body.ttlSeconds !== undefined || body.maxRequests !== undefined) {
+    return jsonResponse(validationError("tier", "GET read passcodes use tier: standard or single.").payload, 400, { cors: true });
+  }
+
+  const tier = getReadPasscodeTier(body.tier);
+  if (!tier.ok) {
+    return jsonResponse(tier.payload, tier.status, { cors: true });
+  }
+
+  const now = nowSeconds();
+  const passcode = generateActionPasscode();
+  const record = {
+    type: "get_read_passcode",
+    tier: tier.value,
+    repo: targetRepo.value,
+    read: true,
+    maxRequests: tier.config.maxRequests,
+    requestsRemaining: tier.config.maxRequests,
+    createdAt: now,
+    expiresAt: now + tier.config.ttlSeconds
+  };
+
+  await store.put(getReadPasscodeKey(await sha256Hex(passcode)), JSON.stringify(record), {
+    expirationTtl: tier.config.ttlSeconds
+  });
+
+  return jsonResponse({
+    ok: true,
+    passcode,
+    queryParam: GET_READ_PASSCODE_QUERY_PARAM,
+    expiresAt: isoFromSeconds(record.expiresAt),
+    scope: {
+      repo: record.repo,
+      tier: record.tier,
+      read: true,
+      maxRequests: record.maxRequests,
+      ttlSeconds: tier.config.ttlSeconds,
+      methods: ["GET"],
+      endpoints: [
+        "/api/get/github/repo",
+        "/api/get/github/tree",
+        "/api/get/github/file",
+        "/api/get/github/prs",
+        "/api/get/github/issues",
+        "/api/get/github/pr-diff"
+      ]
+    }
+  }, 200, { cors: true });
 }
 
 async function handleActionPasscodeCreateRequest(request, env) {
@@ -797,6 +1022,84 @@ async function consumeActionSession(body, env, requirements = {}) {
   };
 }
 
+async function consumeGetReadPasscode(passcode, env, requestedRepo) {
+  const store = getActionStore(env);
+  if (!store) {
+    return actionStoreMissing();
+  }
+
+  const passcodeResult = parseActionPasscode(passcode);
+  if (!passcodeResult.ok) {
+    return {
+      ok: false,
+      status: 401,
+      payload: {
+        error: "invalid_get_read_passcode",
+        message: "The GET read passcode is invalid, expired, or exhausted."
+      }
+    };
+  }
+
+  const key = getReadPasscodeKey(await sha256Hex(passcodeResult.value));
+  const record = await store.get(key, "json");
+  const now = nowSeconds();
+
+  if (!record || record.type !== "get_read_passcode" || record.expiresAt <= now) {
+    return {
+      ok: false,
+      status: 401,
+      payload: {
+        error: "invalid_get_read_passcode",
+        message: "The GET read passcode is invalid, expired, or exhausted."
+      }
+    };
+  }
+
+  if (hasExplicitRepo(requestedRepo)) {
+    const repo = resolveReadableRepo(requestedRepo);
+    if (!repo.ok) {
+      return repo;
+    }
+
+    if (repo.value !== record.repo) {
+      return validationError("repo", "repo must match the GET read passcode repository.");
+    }
+  }
+
+  if (!Number.isSafeInteger(record.requestsRemaining) || record.requestsRemaining < 1) {
+    await store.delete(key);
+    return {
+      ok: false,
+      status: 401,
+      payload: {
+        error: "get_read_passcode_exhausted",
+        message: "The GET read passcode has no requests remaining."
+      }
+    };
+  }
+
+  const updatedRecord = {
+    ...record,
+    requestsRemaining: record.requestsRemaining - 1,
+    lastUsedAt: now
+  };
+
+  if (updatedRecord.requestsRemaining < 1) {
+    await store.delete(key);
+  } else {
+    await store.put(key, JSON.stringify(updatedRecord), {
+      expirationTtl: Math.max(60, record.expiresAt - now)
+    });
+  }
+
+  return {
+    ok: true,
+    status: 200,
+    repo: record.repo,
+    record: updatedRecord
+  };
+}
+
 async function handleGitHubWriteRequest(request, env, pathname) {
   const bodyResult = await readJsonBody(request);
   if (!bodyResult.ok) {
@@ -1121,7 +1424,7 @@ async function fetchGitHubJson(path, env = {}, options = {}) {
       "User-Agent": "gptpro-gh-workbench-broker",
       "X-GitHub-Api-Version": "2022-11-28",
       ...(options.body ? { "Content-Type": "application/json" } : {}),
-      ...(hasGitHubToken(env) ? { "Authorization": `Bearer ${env.GH_TOKEN || env.GITHUB_TOKEN}` } : {})
+      ...(options.auth !== false && hasGitHubToken(env) ? { "Authorization": `Bearer ${env.GH_TOKEN || env.GITHUB_TOKEN}` } : {})
     };
 
     const response = await fetch(`${GITHUB_API_ROOT}${path}`, {
@@ -1150,6 +1453,57 @@ async function fetchGitHubJson(path, env = {}, options = {}) {
     }
 
     return { ok: true, status: 200, payload };
+  } catch {
+    return {
+      ok: false,
+      status: 502,
+      payload: {
+        error: "github_request_failed",
+        message: "GitHub request could not be completed."
+      }
+    };
+  }
+}
+
+async function fetchGitHubText(path, env = {}, options = {}) {
+  try {
+    const headers = {
+      "Accept": "text/plain",
+      "User-Agent": "gptpro-gh-workbench-broker",
+      "X-GitHub-Api-Version": "2022-11-28",
+      ...(options.auth !== false && hasGitHubToken(env) ? { "Authorization": `Bearer ${env.GH_TOKEN || env.GITHUB_TOKEN}` } : {}),
+      ...(options.headers ?? {})
+    };
+
+    const response = await fetch(`${GITHUB_API_ROOT}${path}`, {
+      method: "GET",
+      headers
+    });
+
+    const text = await response.text();
+    if (!response.ok) {
+      return {
+        ok: false,
+        status: upstreamStatus(response.status),
+        payload: {
+          error: "github_request_failed",
+          upstream_status: response.status,
+          message: text || "GitHub request failed."
+        }
+      };
+    }
+
+    const bytes = new TextEncoder().encode(text);
+    if (bytes.length <= MAX_TEXT_BYTES) {
+      return { ok: true, status: 200, payload: text, truncated: false };
+    }
+
+    return {
+      ok: true,
+      status: 200,
+      payload: new TextDecoder().decode(bytes.slice(0, MAX_TEXT_BYTES)),
+      truncated: true
+    };
   } catch {
     return {
       ok: false,
@@ -1260,6 +1614,18 @@ function optionalBoolean(value, field, fallback) {
   return { ok: true, value };
 }
 
+function getReadPasscodeTier(value) {
+  const tier = value === undefined || value === null || value === ""
+    ? DEFAULT_GET_READ_PASSCODE_TIER
+    : value;
+
+  if (typeof tier !== "string" || !Object.hasOwn(GET_READ_PASSCODE_TIERS, tier)) {
+    return validationError("tier", "tier must be standard or single.");
+  }
+
+  return { ok: true, value: tier, config: GET_READ_PASSCODE_TIERS[tier] };
+}
+
 function parseActionPasscode(value) {
   if (typeof value !== "string") {
     return validationError("passcode", "passcode must be a string.");
@@ -1341,6 +1707,10 @@ function actionPasscodeKey(hash) {
   return `action-passcode:${hash}`;
 }
 
+function getReadPasscodeKey(hash) {
+  return `get-read-passcode:${hash}`;
+}
+
 function actionSessionKey(hash) {
   return `action-session:${hash}`;
 }
@@ -1378,6 +1748,28 @@ function resolveTargetRepo(value) {
   const repo = value.trim();
   if (!ALLOWED_TARGET_REPOS.includes(repo)) {
     return validationError("repo", `repo must be one of: ${ALLOWED_TARGET_REPOS.join(", ")}.`);
+  }
+
+  return { ok: true, value: repo };
+}
+
+function resolveReadableRepo(value) {
+  if (value === undefined || value === null || value === "") {
+    return { ok: true, value: TARGET_REPO };
+  }
+
+  if (typeof value !== "string") {
+    return validationError("repo", "repo must use owner/name format.");
+  }
+
+  const repo = value.trim();
+  if (
+    repo.length > 100 ||
+    !/^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/.test(repo) ||
+    repo.includes("..") ||
+    repo.split("/").some((part) => part.startsWith(".") || part.endsWith("."))
+  ) {
+    return validationError("repo", "repo must use safe owner/name format.");
   }
 
   return { ok: true, value: repo };
@@ -1510,6 +1902,107 @@ function validateRepositoryPath(value) {
   }
 
   return { ok: true, value: path };
+}
+
+function optionalRepositoryPath(value) {
+  if (value === undefined || value === null || value === "") {
+    return { ok: true, value: "" };
+  }
+
+  return validateRepositoryPath(value);
+}
+
+function validateReadRef(value) {
+  if (value === undefined || value === null || value === "") {
+    return { ok: true, value: TARGET_DEFAULT_BRANCH };
+  }
+
+  if (typeof value !== "string") {
+    return validationError("ref", "ref must be a branch, tag, or SHA string.");
+  }
+
+  const ref = value.trim();
+  if (
+    !ref ||
+    ref.length > 100 ||
+    ref.startsWith("/") ||
+    ref.startsWith("refs/") ||
+    ref.includes("..") ||
+    ref.includes("//") ||
+    ref.includes("@{") ||
+    ref.endsWith("/") ||
+    ref.endsWith(".") ||
+    /[\s~^:?*[\]\\]/.test(ref)
+  ) {
+    return validationError("ref", "ref contains characters that are not allowed for GET-only reads.");
+  }
+
+  return { ok: true, value: ref };
+}
+
+function normaliseContentsListing(payload, repository, ref, requestedPath) {
+  const entries = Array.isArray(payload) ? payload : [payload];
+
+  return {
+    repository,
+    ref,
+    path: requestedPath || "",
+    entries: entries.map((entry) => ({
+      name: entry.name ?? null,
+      path: entry.path ?? null,
+      type: entry.type ?? null,
+      size: Number.isSafeInteger(entry.size) ? entry.size : null,
+      sha: entry.sha ?? null,
+      download_url: entry.download_url ?? null,
+      html_url: entry.html_url ?? null
+    }))
+  };
+}
+
+function normaliseFilePayload(payload, repository, ref) {
+  if (!payload || payload.type !== "file" || typeof payload.content !== "string") {
+    return validationError("path", "path must identify a readable file.");
+  }
+
+  const decoded = decodeBase64Utf8(payload.content);
+  if (!decoded.ok) {
+    return decoded;
+  }
+
+  return {
+    ok: true,
+    status: 200,
+    payload: {
+      repository,
+      ref,
+      path: payload.path,
+      name: payload.name,
+      sha: payload.sha ?? null,
+      size: Number.isSafeInteger(payload.size) ? payload.size : null,
+      encoding: "utf-8",
+      content: decoded.value,
+      html_url: payload.html_url ?? null
+    }
+  };
+}
+
+function decodeBase64Utf8(value) {
+  try {
+    const compact = value.replace(/\s/g, "");
+    const binary = atob(compact);
+    const bytes = new Uint8Array(binary.length);
+    for (let index = 0; index < binary.length; index += 1) {
+      bytes[index] = binary.charCodeAt(index);
+    }
+
+    if (bytes.length > MAX_TEXT_BYTES) {
+      return validationError("path", `file content is capped at ${MAX_TEXT_BYTES} bytes for GET-only reads.`);
+    }
+
+    return { ok: true, value: new TextDecoder("utf-8", { fatal: true }).decode(bytes) };
+  } catch {
+    return validationError("path", "file content could not be decoded as UTF-8.");
+  }
 }
 
 function validateMergeTarget(pullRequest, targetRepo) {
@@ -1700,6 +2193,7 @@ function isSafeApiPath(pathname) {
     "/api/status",
     "/api/action/readiness",
     "/api/action/passcodes",
+    "/api/action/read-passcodes",
     "/api/action/exchange",
     "/api/action/status",
     "/api/action/actions",
@@ -1707,6 +2201,12 @@ function isSafeApiPath(pathname) {
     "/api/action/github/repo",
     "/api/action/github/prs",
     "/api/action/github/issues",
+    "/api/get/github/repo",
+    "/api/get/github/tree",
+    "/api/get/github/file",
+    "/api/get/github/prs",
+    "/api/get/github/issues",
+    "/api/get/github/pr-diff",
     "/api/actions",
     "/api/github/auth",
     "/api/github/repo",
@@ -1724,9 +2224,21 @@ function isSafeApiPath(pathname) {
 
 function isPostApiPath(pathname) {
   return pathname === "/api/action/passcodes" ||
+    pathname === "/api/action/read-passcodes" ||
     pathname === "/api/action/exchange" ||
     isActionReadPostPath(pathname) ||
     isWriteApiPath(pathname);
+}
+
+function isGetOnlyReadPath(pathname) {
+  return [
+    "/api/get/github/repo",
+    "/api/get/github/tree",
+    "/api/get/github/file",
+    "/api/get/github/prs",
+    "/api/get/github/issues",
+    "/api/get/github/pr-diff"
+  ].includes(pathname);
 }
 
 function isActionSessionBodyPath(pathname) {
