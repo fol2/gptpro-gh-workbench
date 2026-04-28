@@ -12,10 +12,13 @@ The immediate target use case is KS2 Mastery (`fol2/ks2-mastery`): ChatGPT shoul
 - `docs/plan/ks2-github-workbench-establishment-plan.md` - original establishment brief.
 - `docs/plans/2026-04-28-001-feat-ks2-github-workbench-plan.md` - implementation plan for the URL-first portal/workbench direction.
 - `@/2026-04-28-ks2-github-workbench-completion-report.md` - completion report for the planning artefact and recommended next implementation slice.
+- `@/2026-04-28-gptpro-gh-workbench-deployment-report.md` - implementation, review, merge, and live-smoke report for the portal foundation.
 
 ## Current Status
 
-The Cloudflare Worker portal foundation is implemented but not deployed yet. It is intentionally read-only:
+The Cloudflare Worker portal foundation is implemented, merged to `main`, deployed through a Cloudflare Workers route, and live-smoked at `https://gptpro-gh-workbench.eugnel.uk/`.
+
+The live Worker route is intentionally read-only:
 
 - `GET /` renders a compact browser dashboard.
 - `GET /api/status` reports service, repository, capability, executor, auth/write, and allowlisted endpoint status.
@@ -25,6 +28,8 @@ The Cloudflare Worker portal foundation is implemented but not deployed yet. It 
 - `GET /api/actions` lists enabled read operations and disabled write/executor operations.
 
 The private executor, GitHub write authentication, secret handling, and state-changing actions are not connected in this slice.
+
+GitHub write access is not connected in this slice. A scoped GitHub App installation token or fine-grained PAT is still required before the future private executor can create branches, PRs, issues, or comments.
 
 ## Local Development
 
@@ -56,24 +61,24 @@ The Worker configuration uses:
 - Main entry: `src/worker.js`
 - Compatibility date: `2026-04-28`
 - `workers_dev`: disabled
-- Custom domain route candidate: `gptpro-gh-workbench.eugnel.uk`
+- Worker route: `gptpro-gh-workbench.eugnel.uk/*`
 
-Deploy once Cloudflare Wrangler authentication is working:
+Deploy to Cloudflare Workers:
 
 ```sh
 npm run deploy
 ```
 
-The deployed Worker requires `WORKBENCH_SESSION_TOKEN` as a secret. Open the portal with either a short-lived `?session=...` link or a `gptpro_workbench_session` cookie matching that secret.
+The Worker requires `WORKBENCH_SESSION_TOKEN` as a secret. Open the portal with either a short-lived `?session=...` link or a `gptpro_workbench_session` cookie matching that secret.
 
-Set the non-secret `WORKBENCH_DEPLOYMENT_STATUS` environment variable to the current deploy state. Leave it unset before deployment; after a successful deploy and live smoke, set it to a concrete value such as `deployed/live-smoked on 2026-04-28`.
+Set `WORKBENCH_DEPLOYMENT_STATUS` to the current deploy state, either as a Worker variable or secret. Leave it unset before deployment; after a successful deploy and live smoke, set it to a concrete value such as `worker route live-smoked on 2026-04-28`.
 
-Current blocker: Wrangler authentication was failing in the parent SDLC session, so this repository does not claim that the Worker is deployed or live on Cloudflare yet.
+Current GitHub write-access blocker: no scoped GitHub App installation token or fine-grained PAT has been connected to a private executor yet. The deployed Worker intentionally remains read-only.
 
 ## Security Boundaries
 
 - No secrets are stored in code or configuration.
-- No token is accepted, echoed, or returned by the Worker.
+- No GitHub token, write credential, or executor credential is accepted, echoed, or returned by the Worker.
 - A valid workbench session token is required before the dashboard or API endpoints return data.
 - The GitHub API base is fixed to `https://api.github.com/repos/fol2/ks2-mastery`.
 - There is no arbitrary URL fetch, generic proxy, shell execution, executor command execution, or GitHub write operation.
