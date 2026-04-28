@@ -363,6 +363,54 @@ test("branch, file, and PR write endpoints stay on agent branches", async () => 
   });
 });
 
+test("cleanup endpoints close PRs and delete agent branches through fixed APIs", async () => {
+  await withMockedFetch((url, init) => {
+    if (url === "https://api.github.com/repos/fol2/ks2-mastery/pulls/491") {
+      assert.equal(init.method, "PATCH");
+      assert.deepEqual(JSON.parse(init.body), { state: "closed" });
+      return Response.json({ number: 491, state: "closed", html_url: "https://github.com/fol2/ks2-mastery/pull/491" });
+    }
+
+    assert.equal(url, "https://api.github.com/repos/fol2/ks2-mastery/git/refs/heads/agent/workbench-smoke-20260428-1713");
+    assert.equal(init.method, "DELETE");
+    return new Response(null, { status: 204 });
+  }, async (calls) => {
+    const closePr = await jsonPost("/api/github/pulls/close", { number: 491 });
+    const closePayload = await closePr.json();
+    const deleteBranch = await jsonPost("/api/github/branches/delete", {
+      branch: "agent/workbench-smoke-20260428-1713"
+    });
+    const deletePayload = await deleteBranch.json();
+
+    assert.equal(closePr.status, 200);
+    assert.equal(closePayload.state, "closed");
+    assert.equal(deleteBranch.status, 200);
+    assert.equal(deletePayload.deleted, true);
+    assert.equal(deletePayload.branch, "agent/workbench-smoke-20260428-1713");
+    assert.equal(calls.length, 2);
+  });
+});
+
+test("cleanup validation rejects unsafe PR numbers and branches before GitHub calls", async () => {
+  await withMockedFetch(() => {
+    throw new Error("GitHub should not be called for invalid cleanup input");
+  }, async () => {
+    const badNumber = await jsonPost("/api/github/pulls/close", { number: 0 });
+    const badNumberPayload = await badNumber.json();
+    const nonIntegerNumber = await jsonPost("/api/github/pulls/close", { number: "491abc" });
+    const mainBranch = await jsonPost("/api/github/branches/delete", { branch: "main" });
+    const nonAgentBranch = await jsonPost("/api/github/branches/delete", { branch: "feature/workbench-smoke" });
+    const refsBranch = await jsonPost("/api/github/branches/delete", { branch: "refs/heads/agent/workbench-smoke" });
+
+    assert.equal(badNumber.status, 400);
+    assert.equal(badNumberPayload.field, "number");
+    assert.equal(nonIntegerNumber.status, 400);
+    assert.equal(mainBranch.status, 400);
+    assert.equal(nonAgentBranch.status, 400);
+    assert.equal(refsBranch.status, 400);
+  });
+});
+
 test("limit parsing defaults and caps conservative values", () => {
   assert.equal(parseLimit(null), 5);
   assert.equal(parseLimit("0"), 5);

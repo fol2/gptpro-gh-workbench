@@ -14,6 +14,10 @@ The follow-up GitHub write-broker slice is now merged, deployed, and live-smoked
 
 The first live fallback used a temporary Cloudflare Tunnel while the local Wrangler OAuth session was inactive. After the Cloudflare OAuth approval was completed, the Worker was deployed officially and bound to `gptpro-gh-workbench.eugnel.uk/*` as a Cloudflare Workers route. The tunnel fallback was stopped and the named tunnel was deleted before the final smoke, so the current URL is served by Cloudflare Workers rather than by a local tunnel.
 
+## Follow-Up Branch Note
+
+This report's live-smoke evidence describes the deployed PR #5 write-broker slice. A later implementation branch adds a reusable signed-session probe client plus constrained cleanup endpoints for closing temporary PRs and deleting validated `agent/...` branches. Those additions should not be treated as live-deployed until the branch is merged, deployed, and smoked with an updated `WORKBENCH_DEPLOYMENT_STATUS`.
+
 ## What Is Working Now
 
 - The repository exists publicly at `https://github.com/fol2/gptpro-gh-workbench`.
