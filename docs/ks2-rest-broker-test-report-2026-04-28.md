@@ -35,6 +35,7 @@ Capable of:
 - Open a PR from an `agent/...` branch.
 - Close a temporary PR by number.
 - Delete a validated `agent/...` branch for cleanup.
+- Squash-merge an open, non-draft `agent/...` PR into `main` when explicitly called with a PR number and optional expected head SHA.
 
 Not yet capable of:
 
@@ -42,7 +43,7 @@ Not yet capable of:
 - Run local tests or repo-native scripts.
 - Review PR diffs through a local checkout.
 - Submit formal PR review state such as approve or request changes.
-- Merge.
+- Merge arbitrary, draft, closed, forked, or non-`agent/...` pull requests.
 
 ## Required Client Capability
 

@@ -371,6 +371,62 @@ def post_json(
     return request_json(config, "POST", path, body=body, timeout=timeout, transport=transport)
 
 
+def run_merge_pr(
+    config: ProbeConfig,
+    *,
+    number: int,
+    expected_head_sha: str | None = None,
+    title: str | None = None,
+    message: str | None = None,
+    timeout: float = 15,
+    transport=urlopen,
+) -> dict[str, object]:
+    body: dict[str, object] = {"number": number}
+    if expected_head_sha:
+        body["expectedHeadSha"] = expected_head_sha
+    if title:
+        body["title"] = title
+    if message:
+        body["message"] = message
+
+    merge_result = post_json(
+        config,
+        "/api/github/pulls/merge",
+        body,
+        timeout=timeout,
+        transport=transport,
+    )
+    checks = [summarise_check(merge_result)]
+    if not merge_result["ok"]:
+        return {
+            "ok": False,
+            "classification": "merge_failed",
+            "message": "Broker merge request failed.",
+            "session_url": config.redacted_url,
+            "pull_request": {"number": number},
+            "checks": checks,
+            "payload": merge_result.get("payload", {}),
+        }
+
+    payload = merge_result.get("payload", {})
+    if not isinstance(payload, dict):
+        payload = {}
+
+    return {
+        "ok": True,
+        "classification": "merge_completed",
+        "message": "Broker merge completed.",
+        "session_url": config.redacted_url,
+        "pull_request": {
+            "number": number,
+            "url": payload.get("html_url"),
+        },
+        "method": payload.get("method"),
+        "sha": payload.get("sha"),
+        "checks": checks,
+    }
+
+
 def cleanup_smoke(
     config: ProbeConfig,
     branch: str,
@@ -479,7 +535,12 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--timeout", type=float, default=15, help="HTTP timeout in seconds.")
     parser.add_argument("--json", action="store_true", help="Print machine-readable JSON.")
-    parser.add_argument("--write-smoke", action="store_true", help="Run an opt-in branch/file/PR write smoke.")
+    action = parser.add_mutually_exclusive_group()
+    action.add_argument("--write-smoke", action="store_true", help="Run an opt-in branch/file/PR write smoke.")
+    action.add_argument("--merge-pr", type=int, help="Squash-merge one guarded agent PR by number.")
+    parser.add_argument("--expected-head-sha", help="Optional 40-character head SHA guard for --merge-pr.")
+    parser.add_argument("--merge-title", help="Optional commit title for --merge-pr.")
+    parser.add_argument("--merge-message", help="Optional commit message for --merge-pr.")
     return parser
 
 
@@ -504,6 +565,20 @@ def main(argv: list[str] | None = None) -> int:
                 "checks": result["checks"],
             }
             result = run_write_smoke(config, timeout=args.timeout)
+            result["read_probe"] = read_probe
+        elif result["ok"] and args.merge_pr:
+            read_probe = {
+                "classification": result["classification"],
+                "checks": result["checks"],
+            }
+            result = run_merge_pr(
+                config,
+                number=args.merge_pr,
+                expected_head_sha=args.expected_head_sha,
+                title=args.merge_title,
+                message=args.merge_message,
+                timeout=args.timeout,
+            )
             result["read_probe"] = read_probe
 
     if args.json:

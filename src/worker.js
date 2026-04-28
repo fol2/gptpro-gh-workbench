@@ -8,6 +8,7 @@ const MAX_GITHUB_LIMIT = 10;
 const DEFAULT_GITHUB_LIMIT = 5;
 const MAX_JSON_BYTES = 32_768;
 const MAX_TEXT_BYTES = 65_536;
+const DEFAULT_MERGE_METHOD = "squash";
 const SESSION_COOKIE_NAME = "gptpro_workbench_session";
 const SESSION_QUERY_PARAM = "session";
 
@@ -27,7 +28,8 @@ const WRITE_ENDPOINTS = [
   "POST /api/github/branches/delete",
   "POST /api/github/files",
   "POST /api/github/pulls",
-  "POST /api/github/pulls/close"
+  "POST /api/github/pulls/close",
+  "POST /api/github/pulls/merge"
 ];
 
 function buildActions(env = {}) {
@@ -57,12 +59,12 @@ function buildActions(env = {}) {
   },
   {
     id: "github.write",
-    label: "Create branches, comments, issues, pull requests, or smoke cleanup",
+    label: "Create branches, comments, issues, pull requests, cleanup, or guarded merges",
     status: writeEnabled ? "enabled" : "disabled",
     method: "POST",
     endpoint: "/api/github/*",
     reason: writeEnabled
-      ? "Enabled for allowlisted operations on fol2/ks2-mastery only; writes to main, workflows, admin, secrets, and merges are disabled."
+      ? "Enabled for allowlisted operations on fol2/ks2-mastery only; merges are limited to open non-draft agent pull requests into main."
       : "Disabled until GH_TOKEN is configured as a Worker secret."
   },
   {
@@ -296,8 +298,9 @@ async function buildGitHubAuthStatus(env) {
         put_file_on_agent_branch: true,
         create_pr_from_agent_branch: true,
         close_pull_request: true,
+        merge_agent_pull_request: true,
         direct_main_write: false,
-        merge: false,
+        merge: "agent_pr_squash_only",
         workflow_edit: false,
         secrets_or_admin: false,
         shell_execution: false
@@ -346,6 +349,10 @@ async function handleGitHubWriteRequest(request, env, pathname) {
 
   if (pathname === "/api/github/pulls/close") {
     return githubResponse(await closePullRequest(body, env));
+  }
+
+  if (pathname === "/api/github/pulls/merge") {
+    return githubResponse(await mergePullRequest(body, env));
   }
 
   return jsonResponse({
@@ -529,6 +536,65 @@ async function closePullRequest(body, env) {
   });
 }
 
+async function mergePullRequest(body, env) {
+  const number = positiveInteger(body.number, "number");
+  if (!number.ok) return number;
+
+  const method = mergeMethod(body.method);
+  if (!method.ok) return method;
+
+  const expectedHeadSha = optionalSha(body.expectedHeadSha ?? body.sha, "expectedHeadSha");
+  if (!expectedHeadSha.ok) return expectedHeadSha;
+
+  const title = boundedText(body.title ?? body.commit_title ?? "", "title", 256);
+  if (!title.ok) return title;
+
+  const message = boundedText(body.message ?? body.commit_message ?? "", "message", 8192);
+  if (!message.ok) return message;
+
+  const pullRequest = await fetchGitHubJson(`/repos/${TARGET_REPO}/pulls/${number.value}`, env);
+  if (!pullRequest.ok) return pullRequest;
+
+  const guard = validateMergeTarget(pullRequest.payload);
+  if (!guard.ok) return guard;
+
+  const headSha = pullRequest.payload?.head?.sha;
+  if (expectedHeadSha.value && typeof headSha === "string" && expectedHeadSha.value !== headSha.toLowerCase()) {
+    return validationError("expectedHeadSha", "expectedHeadSha does not match the current pull request head SHA.");
+  }
+
+  const mergeBody = {
+    merge_method: method.value,
+    ...(title.value ? { commit_title: title.value } : {}),
+    ...(message.value ? { commit_message: message.value } : {}),
+    ...(expectedHeadSha.value ? { sha: expectedHeadSha.value } : {})
+  };
+
+  const merged = await fetchGitHubJson(`/repos/${TARGET_REPO}/pulls/${number.value}/merge`, env, {
+    method: "PUT",
+    body: mergeBody
+  });
+  if (!merged.ok) return merged;
+
+  return {
+    ok: true,
+    status: 200,
+    payload: {
+      merged: Boolean(merged.payload?.merged),
+      number: number.value,
+      method: method.value,
+      sha: merged.payload?.sha ?? null,
+      message: merged.payload?.message ?? "Pull request merged.",
+      html_url: pullRequest.payload?.html_url ?? null,
+      base: TARGET_DEFAULT_BRANCH,
+      head: {
+        ref: pullRequest.payload?.head?.ref,
+        sha: headSha ?? null
+      }
+    }
+  };
+}
+
 async function deleteAgentBranch(body, env) {
   const branch = validateAgentBranch(body.branch);
   if (!branch.ok) return branch;
@@ -624,6 +690,30 @@ function positiveInteger(value, field) {
   return { ok: true, value: parsed };
 }
 
+function mergeMethod(value) {
+  const method = typeof value === "string" && value.trim()
+    ? value.trim().toLowerCase()
+    : DEFAULT_MERGE_METHOD;
+
+  if (method !== DEFAULT_MERGE_METHOD) {
+    return validationError("method", "Only squash merges are enabled for this broker.");
+  }
+
+  return { ok: true, value: method };
+}
+
+function optionalSha(value, field) {
+  if (value === undefined || value === null || value === "") {
+    return { ok: true, value: null };
+  }
+
+  if (!isSha(value)) {
+    return validationError(field, `${field} must be a 40-character Git SHA.`);
+  }
+
+  return { ok: true, value: value.toLowerCase() };
+}
+
 function boundedText(value, field, maxBytes, options = {}) {
   if (typeof value !== "string") {
     if (options.required) {
@@ -706,6 +796,39 @@ function validateRepositoryPath(value) {
   }
 
   return { ok: true, value: path };
+}
+
+function validateMergeTarget(pullRequest) {
+  if (!pullRequest || typeof pullRequest !== "object") {
+    return validationError("number", "Pull request metadata could not be validated.");
+  }
+
+  if (pullRequest.state !== "open") {
+    return validationError("number", "Only open pull requests can be merged by this broker.");
+  }
+
+  if (pullRequest.draft === true) {
+    return validationError("number", "Draft pull requests cannot be merged by this broker.");
+  }
+
+  if (pullRequest.base?.ref !== TARGET_DEFAULT_BRANCH || pullRequest.base?.repo?.full_name !== TARGET_REPO) {
+    return validationError("base", `Only pull requests targeting ${TARGET_REPO}:${TARGET_DEFAULT_BRANCH} can be merged by this broker.`);
+  }
+
+  if (pullRequest.head?.repo?.full_name !== TARGET_REPO) {
+    return validationError("head", `Only ${TARGET_REPO} head branches can be merged by this broker.`);
+  }
+
+  const headRef = pullRequest.head?.ref;
+  if (typeof headRef !== "string" || invalidAgentBranchReason(headRef)) {
+    return validationError("head", "Only agent/... head branches can be merged by this broker.");
+  }
+
+  if (pullRequest.mergeable === false) {
+    return validationError("mergeable", "GitHub reports this pull request is not mergeable.");
+  }
+
+  return { ok: true };
 }
 
 function validationError(field, message) {
@@ -866,7 +989,8 @@ function isSafeApiPath(pathname) {
     "/api/github/branches/delete",
     "/api/github/files",
     "/api/github/pulls",
-    "/api/github/pulls/close"
+    "/api/github/pulls/close",
+    "/api/github/pulls/merge"
   ].includes(pathname);
 }
 
@@ -878,7 +1002,8 @@ function isWriteApiPath(pathname) {
     "/api/github/branches/delete",
     "/api/github/files",
     "/api/github/pulls",
-    "/api/github/pulls/close"
+    "/api/github/pulls/close",
+    "/api/github/pulls/merge"
   ].includes(pathname);
 }
 
@@ -1061,7 +1186,7 @@ function renderDashboard({ env = {}, sessionQueryToken = null } = {}) {
   <body>
     <header>
       <h1>${escapeHtml(SERVICE_NAME)}</h1>
-      <p>Session-protected workbench portal for <a href="https://github.com/${TARGET_REPO}">${TARGET_REPO}</a>. It exposes fixed GitHub read endpoints and narrow write endpoints for agent branches only; shell execution and privileged repository administration are not exposed.</p>
+      <p>Session-protected workbench portal for <a href="https://github.com/${TARGET_REPO}">${TARGET_REPO}</a>. It exposes fixed GitHub read endpoints and narrow write endpoints for agent branches, including guarded agent PR merges; shell execution and privileged repository administration are not exposed.</p>
     </header>
     <main>
       <div class="stack">

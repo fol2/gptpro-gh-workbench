@@ -47,5 +47,7 @@ test("runtime report distinguishes deployed broker capability from runtime opera
   assert.match(report, /Only run write smoke after the cleanup endpoints are deployed and authenticated/i);
   assert.match(readme, /POST \/api\/github\/pulls\/close/);
   assert.match(readme, /POST \/api\/github\/branches\/delete/);
+  assert.match(readme, /POST \/api\/github\/pulls\/merge/);
+  assert.match(readme, /open, non-draft `agent\/\.\.\.` pull requests/i);
   assert.match(readme, /There is no arbitrary URL fetch, generic proxy, shell execution/i);
 });
