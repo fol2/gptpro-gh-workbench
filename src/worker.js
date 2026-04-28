@@ -1,21 +1,37 @@
 const SERVICE_NAME = "GPTPro GitHub Workbench Portal";
 const PROJECT_REPO = "fol2/gptpro-gh-workbench";
 const TARGET_REPO = "fol2/ks2-mastery";
-const GITHUB_API_BASE = "https://api.github.com/repos/fol2/ks2-mastery";
+const TARGET_DEFAULT_BRANCH = "main";
+const GITHUB_API_ROOT = "https://api.github.com";
+const GITHUB_API_BASE = `${GITHUB_API_ROOT}/repos/${TARGET_REPO}`;
 const MAX_GITHUB_LIMIT = 10;
 const DEFAULT_GITHUB_LIMIT = 5;
+const MAX_JSON_BYTES = 32_768;
+const MAX_TEXT_BYTES = 65_536;
 const SESSION_COOKIE_NAME = "gptpro_workbench_session";
 const SESSION_QUERY_PARAM = "session";
 
 const READ_ENDPOINTS = [
   "/api/status",
+  "/api/github/auth",
   "/api/github/repo",
   "/api/github/prs?limit=5",
   "/api/github/issues?limit=5",
   "/api/actions"
 ];
 
-const ACTIONS = [
+const WRITE_ENDPOINTS = [
+  "POST /api/github/issues",
+  "POST /api/github/comments",
+  "POST /api/github/branches",
+  "POST /api/github/files",
+  "POST /api/github/pulls"
+];
+
+function buildActions(env = {}) {
+  const writeEnabled = hasGitHubToken(env);
+
+  return [
   {
     id: "github.repo.read",
     label: "Read target repository metadata",
@@ -40,8 +56,12 @@ const ACTIONS = [
   {
     id: "github.write",
     label: "Create branches, comments, issues, or pull requests",
-    status: "disabled",
-    reason: "Write authentication is intentionally disabled in this foundation slice."
+    status: writeEnabled ? "enabled" : "disabled",
+    method: "POST",
+    endpoint: "/api/github/*",
+    reason: writeEnabled
+      ? "Enabled for allowlisted operations on fol2/ks2-mastery only; writes to main, workflows, admin, secrets, and merges are disabled."
+      : "Disabled until GH_TOKEN is configured as a Worker secret."
   },
   {
     id: "executor.command",
@@ -53,9 +73,10 @@ const ACTIONS = [
     id: "secrets.manage",
     label: "Read or manage secrets",
     status: "disabled",
-    reason: "Secret handling is out of scope for the read-only portal foundation."
+    reason: "Secret handling is never exposed through the public Worker."
   }
-];
+  ];
+}
 
 const SECURITY_HEADERS = {
   "Content-Security-Policy": [
@@ -76,7 +97,7 @@ const SECURITY_HEADERS = {
 
 const CORS_HEADERS = {
   "Access-Control-Allow-Origin": "*",
-  "Access-Control-Allow-Methods": "GET, OPTIONS",
+  "Access-Control-Allow-Methods": "GET, POST, OPTIONS",
   "Access-Control-Allow-Headers": "Accept, Content-Type",
   "Access-Control-Max-Age": "86400"
 };
@@ -101,10 +122,16 @@ export async function handleRequest(request, env = {}, ctx = {}) {
     });
   }
 
-  if (request.method !== "GET") {
+  if (!["GET", "POST"].includes(request.method)) {
     return url.pathname.startsWith("/api/")
-      ? jsonResponse({ error: "method_not_allowed", message: "Only GET is enabled in this read-only portal." }, 405)
-      : htmlResponse(renderHtmlError(405, "Method not allowed", "Only GET requests are enabled in this read-only portal."), 405);
+      ? jsonResponse({ error: "method_not_allowed", message: "Only GET and allowlisted POST requests are enabled." }, 405)
+      : htmlResponse(renderHtmlError(405, "Method not allowed", "Only GET requests are enabled for browser paths."), 405);
+  }
+
+  if (request.method === "POST" && !isWriteApiPath(url.pathname)) {
+    return url.pathname.startsWith("/api/")
+      ? jsonResponse({ error: "method_not_allowed", message: "POST is only enabled for allowlisted GitHub write endpoints." }, 405)
+      : htmlResponse(renderHtmlError(405, "Method not allowed", "Only GET requests are enabled for browser paths."), 405);
   }
 
   const session = getSessionContext(request, env);
@@ -119,6 +146,10 @@ export async function handleRequest(request, env = {}, ctx = {}) {
         "Session required",
         "This portal is protected. Open it with a short-lived workbench session link."
       ), 401);
+  }
+
+  if (request.method === "POST") {
+    return handleGitHubWriteRequest(request, env, url.pathname);
   }
 
   if (url.pathname === "/") {
@@ -137,23 +168,27 @@ export async function handleRequest(request, env = {}, ctx = {}) {
   if (url.pathname === "/api/actions") {
     return jsonResponse({
       service: SERVICE_NAME,
-      mode: "read-only foundation",
-      actions: ACTIONS
+      mode: hasGitHubToken(env) ? "github write broker" : "read-only without GH_TOKEN",
+      actions: buildActions(env)
     }, 200, { cors: true });
   }
 
+  if (url.pathname === "/api/github/auth") {
+    return githubResponse(await buildGitHubAuthStatus(env));
+  }
+
   if (url.pathname === "/api/github/repo") {
-    return githubResponse(await fetchGitHubJson(""));
+    return githubResponse(await fetchGitHubJson(`/repos/${TARGET_REPO}`));
   }
 
   if (url.pathname === "/api/github/prs") {
     const limit = parseLimit(url.searchParams.get("limit"));
-    return githubResponse(await fetchGitHubJson(`/pulls?state=open&per_page=${limit}`));
+    return githubResponse(await fetchGitHubJson(`/repos/${TARGET_REPO}/pulls?state=open&per_page=${limit}`));
   }
 
   if (url.pathname === "/api/github/issues") {
     const limit = parseLimit(url.searchParams.get("limit"));
-    const result = await fetchGitHubJson(`/issues?state=open&per_page=${limit}`);
+    const result = await fetchGitHubJson(`/repos/${TARGET_REPO}/issues?state=open&per_page=${limit}`);
     if (!result.ok) {
       return githubResponse(result);
     }
@@ -166,7 +201,8 @@ export async function handleRequest(request, env = {}, ctx = {}) {
     return jsonResponse({
       error: "not_found",
       message: "This API path is not allowlisted.",
-      allowed_read_endpoints: READ_ENDPOINTS
+      allowed_read_endpoints: READ_ENDPOINTS,
+      allowed_write_endpoints: WRITE_ENDPOINTS
     }, 404);
   }
 
@@ -174,12 +210,14 @@ export async function handleRequest(request, env = {}, ctx = {}) {
 }
 
 export function buildStatus(env = {}) {
+  const writeEnabled = hasGitHubToken(env);
+
   return {
     service: SERVICE_NAME,
     project_repo: PROJECT_REPO,
     target_repo: TARGET_REPO,
-    capability_mode: "read-only foundation",
-    portal_status: "responding/read-only foundation",
+    capability_mode: writeEnabled ? "session-protected github write broker" : "read-only without GH_TOKEN",
+    portal_status: writeEnabled ? "responding/github write broker" : "responding/read-only without GH_TOKEN",
     deployment_status: env.WORKBENCH_DEPLOYMENT_STATUS || "not claimed until deployed and live-smoked",
     access_status: "session required",
     executor_status: {
@@ -188,11 +226,14 @@ export function buildStatus(env = {}) {
       note: "Private executor command execution is intentionally absent from this slice."
     },
     auth_write_status: {
-      enabled: false,
-      status: "disabled",
-      note: "No GitHub token or write credential is accepted or echoed by this Worker."
+      enabled: writeEnabled,
+      status: writeEnabled ? "enabled via GH_TOKEN Worker secret" : "disabled/missing GH_TOKEN",
+      note: writeEnabled
+        ? "GitHub writes are constrained to allowlisted repository API operations on fol2/ks2-mastery; the token is never returned."
+        : "No GitHub write credential is configured for this Worker."
     },
     allowlisted_read_endpoints: READ_ENDPOINTS,
+    allowlisted_write_endpoints: WRITE_ENDPOINTS,
     github_api_base: GITHUB_API_BASE
   };
 }
@@ -206,14 +247,281 @@ export function parseLimit(value) {
   return Math.min(parsed, MAX_GITHUB_LIMIT);
 }
 
-async function fetchGitHubJson(path) {
-  try {
-    const response = await fetch(`${GITHUB_API_BASE}${path}`, {
-      headers: {
-        "Accept": "application/vnd.github+json",
-        "User-Agent": "gptpro-gh-workbench-readonly-portal",
-        "X-GitHub-Api-Version": "2022-11-28"
+async function buildGitHubAuthStatus(env) {
+  if (!hasGitHubToken(env)) {
+    return {
+      ok: false,
+      status: 503,
+      payload: {
+        error: "github_token_missing",
+        message: "GH_TOKEN is not configured for this Worker."
       }
+    };
+  }
+
+  const user = await fetchGitHubJson("/user", env);
+  if (!user.ok) {
+    return user;
+  }
+
+  const repo = await fetchGitHubJson(`/repos/${TARGET_REPO}`, env);
+  if (!repo.ok) {
+    return repo;
+  }
+
+  return {
+    ok: true,
+    status: 200,
+    payload: {
+      service: SERVICE_NAME,
+      target_repo: TARGET_REPO,
+      authenticated: true,
+      github_user: {
+        login: user.payload.login,
+        id: user.payload.id
+      },
+      repository: {
+        full_name: repo.payload.full_name,
+        default_branch: repo.payload.default_branch,
+        viewer_permission: permissionLabel(repo.payload.permissions),
+        permissions: repo.payload.permissions ?? null
+      },
+      capabilities: {
+        create_issue: true,
+        create_issue_or_pr_comment: true,
+        create_agent_branch: true,
+        put_file_on_agent_branch: true,
+        create_pr_from_agent_branch: true,
+        direct_main_write: false,
+        merge: false,
+        workflow_edit: false,
+        secrets_or_admin: false,
+        shell_execution: false
+      }
+    }
+  };
+}
+
+async function handleGitHubWriteRequest(request, env, pathname) {
+  if (!hasGitHubToken(env)) {
+    return jsonResponse({
+      error: "github_token_missing",
+      message: "GH_TOKEN is not configured for this Worker."
+    }, 503, { cors: true });
+  }
+
+  const bodyResult = await readJsonBody(request);
+  if (!bodyResult.ok) {
+    return jsonResponse(bodyResult.payload, bodyResult.status, { cors: true });
+  }
+
+  const body = bodyResult.payload;
+  if (pathname === "/api/github/issues") {
+    return githubResponse(await createIssue(body, env));
+  }
+
+  if (pathname === "/api/github/comments") {
+    return githubResponse(await createIssueComment(body, env));
+  }
+
+  if (pathname === "/api/github/branches") {
+    return githubResponse(await createAgentBranch(body, env));
+  }
+
+  if (pathname === "/api/github/files") {
+    return githubResponse(await putRepositoryFile(body, env));
+  }
+
+  if (pathname === "/api/github/pulls") {
+    return githubResponse(await createPullRequest(body, env));
+  }
+
+  return jsonResponse({
+    error: "not_found",
+    message: "This write path is not allowlisted.",
+    allowed_write_endpoints: WRITE_ENDPOINTS
+  }, 404, { cors: true });
+}
+
+async function readJsonBody(request) {
+  const contentType = request.headers.get("Content-Type") ?? "";
+  if (!contentType.toLowerCase().includes("application/json")) {
+    return {
+      ok: false,
+      status: 415,
+      payload: {
+        error: "unsupported_media_type",
+        message: "Write requests must use application/json."
+      }
+    };
+  }
+
+  const raw = await request.text();
+  if (new TextEncoder().encode(raw).length > MAX_JSON_BYTES) {
+    return {
+      ok: false,
+      status: 413,
+      payload: {
+        error: "request_too_large",
+        message: `JSON request bodies are capped at ${MAX_JSON_BYTES} bytes.`
+      }
+    };
+  }
+
+  try {
+    const payload = JSON.parse(raw);
+    if (!payload || typeof payload !== "object" || Array.isArray(payload)) {
+      return {
+        ok: false,
+        status: 400,
+        payload: {
+          error: "invalid_json_object",
+          message: "Request body must be a JSON object."
+        }
+      };
+    }
+
+    return { ok: true, status: 200, payload };
+  } catch {
+    return {
+      ok: false,
+      status: 400,
+      payload: {
+        error: "invalid_json",
+        message: "Request body must be valid JSON."
+      }
+    };
+  }
+}
+
+async function createIssue(body, env) {
+  const title = boundedText(body.title, "title", 256, { required: true });
+  if (!title.ok) return title;
+
+  const issueBody = boundedText(body.body ?? "", "body", 8192);
+  if (!issueBody.ok) return issueBody;
+
+  return fetchGitHubJson(`/repos/${TARGET_REPO}/issues`, env, {
+    method: "POST",
+    body: {
+      title: title.value,
+      body: issueBody.value
+    }
+  });
+}
+
+async function createIssueComment(body, env) {
+  const number = positiveInteger(body.number, "number");
+  if (!number.ok) return number;
+
+  const commentBody = boundedText(body.body, "body", 8192, { required: true });
+  if (!commentBody.ok) return commentBody;
+
+  return fetchGitHubJson(`/repos/${TARGET_REPO}/issues/${number.value}/comments`, env, {
+    method: "POST",
+    body: {
+      body: commentBody.value
+    }
+  });
+}
+
+async function createAgentBranch(body, env) {
+  const branch = validateAgentBranch(body.branch);
+  if (!branch.ok) return branch;
+
+  const base = await fetchGitHubJson(`/repos/${TARGET_REPO}/git/ref/heads/${TARGET_DEFAULT_BRANCH}`, env);
+  if (!base.ok) return base;
+
+  const sha = base.payload?.object?.sha;
+  if (!isSha(sha)) {
+    return validationError("from_sha", "Base branch SHA could not be resolved.");
+  }
+
+  const created = await fetchGitHubJson(`/repos/${TARGET_REPO}/git/refs`, env, {
+    method: "POST",
+    body: {
+      ref: `refs/heads/${branch.value}`,
+      sha
+    }
+  });
+
+  return normaliseReferenceAlreadyExists(created);
+}
+
+async function putRepositoryFile(body, env) {
+  const branch = validateAgentBranch(body.branch);
+  if (!branch.ok) return branch;
+
+  const path = validateRepositoryPath(body.path);
+  if (!path.ok) return path;
+
+  const content = boundedText(body.content, "content", MAX_TEXT_BYTES, { required: true, trim: false });
+  if (!content.ok) return content;
+
+  const message = boundedText(body.message || `Update ${path.value}`, "message", 200, { required: true });
+  if (!message.ok) return message;
+
+  const filePath = encodeRepoPath(path.value);
+  const existing = await fetchGitHubJson(
+    `/repos/${TARGET_REPO}/contents/${filePath}?ref=${encodeURIComponent(branch.value)}`,
+    env
+  );
+
+  if (!existing.ok && existing.payload?.upstream_status !== 404) {
+    return existing;
+  }
+
+  const sha = existing.ok ? existing.payload?.sha : null;
+  return fetchGitHubJson(`/repos/${TARGET_REPO}/contents/${filePath}`, env, {
+    method: "PUT",
+    body: {
+      message: message.value,
+      content: base64EncodeUtf8(content.value),
+      branch: branch.value,
+      ...(sha ? { sha } : {})
+    }
+  });
+}
+
+async function createPullRequest(body, env) {
+  const branch = validateAgentBranch(body.branch || body.head);
+  if (!branch.ok) return branch;
+
+  const title = boundedText(body.title, "title", 256, { required: true });
+  if (!title.ok) return title;
+
+  const prBody = boundedText(body.body ?? "", "body", 8192);
+  if (!prBody.ok) return prBody;
+
+  return fetchGitHubJson(`/repos/${TARGET_REPO}/pulls`, env, {
+    method: "POST",
+    body: {
+      title: title.value,
+      head: branch.value,
+      base: TARGET_DEFAULT_BRANCH,
+      body: prBody.value,
+      draft: Boolean(body.draft)
+    }
+  });
+}
+
+async function fetchGitHubJson(path, env = {}, options = {}) {
+  try {
+    const headers = {
+      "Accept": "application/vnd.github+json",
+      "User-Agent": "gptpro-gh-workbench-broker",
+      "X-GitHub-Api-Version": "2022-11-28",
+      ...(options.body ? { "Content-Type": "application/json" } : {}),
+      ...(hasGitHubToken(env) ? { "Authorization": `Bearer ${env.GH_TOKEN || env.GITHUB_TOKEN}` } : {})
+    };
+
+    const response = await fetch(`${GITHUB_API_ROOT}${path}`, {
+      method: options.method ?? "GET",
+      headers: {
+        ...headers,
+        ...(options.headers ?? {})
+      },
+      ...(options.body ? { body: JSON.stringify(options.body) } : {})
     });
 
     const payload = await response.json().catch(() => ({
@@ -247,6 +555,157 @@ async function fetchGitHubJson(path) {
 
 function githubResponse(result) {
   return jsonResponse(result.payload, result.status, { cors: true });
+}
+
+function hasGitHubToken(env = {}) {
+  return Boolean(env.GH_TOKEN || env.GITHUB_TOKEN);
+}
+
+function permissionLabel(permissions = {}) {
+  if (permissions?.admin) return "ADMIN";
+  if (permissions?.maintain) return "MAINTAIN";
+  if (permissions?.push) return "WRITE";
+  if (permissions?.triage) return "TRIAGE";
+  if (permissions?.pull) return "READ";
+  return "UNKNOWN";
+}
+
+function positiveInteger(value, field) {
+  const parsed = Number.parseInt(value, 10);
+  if (!Number.isSafeInteger(parsed) || parsed < 1) {
+    return validationError(field, `${field} must be a positive integer.`);
+  }
+
+  return { ok: true, value: parsed };
+}
+
+function boundedText(value, field, maxBytes, options = {}) {
+  if (typeof value !== "string") {
+    if (options.required) {
+      return validationError(field, `${field} must be a string.`);
+    }
+    return { ok: true, value: "" };
+  }
+
+  const trimmed = options.trim === false ? value : value.trim();
+  if (options.required && trimmed.length === 0) {
+    return validationError(field, `${field} is required.`);
+  }
+
+  if (new TextEncoder().encode(trimmed).length > maxBytes) {
+    return validationError(field, `${field} is capped at ${maxBytes} bytes.`);
+  }
+
+  return { ok: true, value: trimmed };
+}
+
+function validateAgentBranch(value) {
+  if (typeof value !== "string") {
+    return validationError("branch", "branch must be a string beginning with agent/.");
+  }
+
+  const branch = value.trim();
+  const invalidReason = invalidAgentBranchReason(branch);
+  if (invalidReason) {
+    return validationError("branch", invalidReason);
+  }
+
+  return { ok: true, value: branch };
+}
+
+function invalidAgentBranchReason(branch) {
+  if (!branch.startsWith("agent/") || branch === "agent/") {
+    return "branch must begin with agent/ and include a task name.";
+  }
+
+  if (branch === TARGET_DEFAULT_BRANCH || branch.startsWith("refs/")) {
+    return "direct writes to main or refs/* are disabled.";
+  }
+
+  if (branch.length > 100) {
+    return "branch is capped at 100 characters.";
+  }
+
+  if (
+    branch.includes("..") ||
+    branch.includes("//") ||
+    branch.includes("@{") ||
+    branch.endsWith("/") ||
+    branch.endsWith(".") ||
+    branch.endsWith(".lock") ||
+    /[\s~^:?*[\]\\]/.test(branch)
+  ) {
+    return "branch contains characters that are not allowed for workbench agent branches.";
+  }
+
+  return null;
+}
+
+function validateRepositoryPath(value) {
+  if (typeof value !== "string") {
+    return validationError("path", "path must be a relative repository path.");
+  }
+
+  const path = value.trim();
+  if (!path || path.length > 250 || path.startsWith("/") || path.includes("\0")) {
+    return validationError("path", "path must be a non-empty relative repository path capped at 250 characters.");
+  }
+
+  const parts = path.split("/");
+  if (parts.some((part) => !part || part === "." || part === "..")) {
+    return validationError("path", "path must not contain empty, current, or parent directory segments.");
+  }
+
+  if (path.toLowerCase().startsWith(".github/workflows/")) {
+    return validationError("path", "workflow file edits are disabled for this broker.");
+  }
+
+  return { ok: true, value: path };
+}
+
+function validationError(field, message) {
+  return {
+    ok: false,
+    status: 400,
+    payload: {
+      error: "validation_failed",
+      field,
+      message
+    }
+  };
+}
+
+function isSha(value) {
+  return typeof value === "string" && /^[0-9a-f]{40}$/i.test(value);
+}
+
+function normaliseReferenceAlreadyExists(result) {
+  if (result.ok || result.payload?.upstream_status !== 422) {
+    return result;
+  }
+
+  return {
+    ok: false,
+    status: 409,
+    payload: {
+      error: "github_reference_exists",
+      upstream_status: 422,
+      message: result.payload.message || "The requested branch already exists."
+    }
+  };
+}
+
+function encodeRepoPath(path) {
+  return path.split("/").map((part) => encodeURIComponent(part)).join("/");
+}
+
+function base64EncodeUtf8(value) {
+  const bytes = new TextEncoder().encode(value);
+  let binary = "";
+  for (const byte of bytes) {
+    binary += String.fromCharCode(byte);
+  }
+  return btoa(binary);
 }
 
 function upstreamStatus(status) {
@@ -353,15 +812,31 @@ function isSafeApiPath(pathname) {
   return [
     "/api/status",
     "/api/actions",
+    "/api/github/auth",
     "/api/github/repo",
     "/api/github/prs",
-    "/api/github/issues"
+    "/api/github/issues",
+    "/api/github/comments",
+    "/api/github/branches",
+    "/api/github/files",
+    "/api/github/pulls"
+  ].includes(pathname);
+}
+
+function isWriteApiPath(pathname) {
+  return [
+    "/api/github/issues",
+    "/api/github/comments",
+    "/api/github/branches",
+    "/api/github/files",
+    "/api/github/pulls"
   ].includes(pathname);
 }
 
 function renderDashboard({ env = {}, sessionQueryToken = null } = {}) {
   const status = buildStatus(env);
-  const actionRows = ACTIONS.map((action) => `
+  const actions = buildActions(env);
+  const actionRows = actions.map((action) => `
         <tr>
           <td>${escapeHtml(action.id)}</td>
           <td>${escapeHtml(action.status)}</td>
@@ -537,7 +1012,7 @@ function renderDashboard({ env = {}, sessionQueryToken = null } = {}) {
   <body>
     <header>
       <h1>${escapeHtml(SERVICE_NAME)}</h1>
-      <p>Portal foundation for <a href="https://github.com/${TARGET_REPO}">${TARGET_REPO}</a>. It is read-only, browser-readable, and API-readable; the private executor is not connected yet.</p>
+      <p>Session-protected workbench portal for <a href="https://github.com/${TARGET_REPO}">${TARGET_REPO}</a>. It exposes fixed GitHub read endpoints and narrow write endpoints for agent branches only; shell execution and privileged repository administration are not exposed.</p>
     </header>
     <main>
       <div class="stack">
@@ -566,7 +1041,7 @@ function renderDashboard({ env = {}, sessionQueryToken = null } = {}) {
             </div>
             <div class="metric">
               <strong>Auth and writes</strong>
-              <span class="disabled">${escapeHtml(status.auth_write_status.status)}</span>
+              <span class="${status.auth_write_status.enabled ? "" : "disabled"}">${escapeHtml(status.auth_write_status.status)}</span>
             </div>
           </div>
         </section>

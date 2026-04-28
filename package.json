@@ -3,7 +3,7 @@
   "version": "0.1.0",
   "private": true,
   "type": "module",
-  "description": "Read-only Cloudflare Worker portal foundation for the GPTPro GitHub Workbench.",
+  "description": "Session-protected Cloudflare Worker portal and narrow GitHub broker for the GPTPro GitHub Workbench.",
   "scripts": {
     "test": "node --test",
     "check": "node --check src/worker.js && node --check tests/worker.test.js",
