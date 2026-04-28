@@ -6,8 +6,8 @@
   "workers_dev": false,
   "routes": [
     {
-      "pattern": "gptpro-gh-workbench.eugnel.uk",
-      "custom_domain": true
+      "pattern": "gptpro-gh-workbench.eugnel.uk/*",
+      "zone_name": "eugnel.uk"
     }
   ]
 }
