@@ -16,9 +16,9 @@ The immediate target use case is KS2 Mastery (`fol2/ks2-mastery`): ChatGPT shoul
 
 ## Current Status
 
-The Cloudflare Worker portal foundation is implemented, merged to `main`, deployed through a Cloudflare Workers route, and live-smoked at `https://gptpro-gh-workbench.eugnel.uk/`. This branch adds the GitHub write-broker slice; the report should only be treated as final live evidence after the branch is merged, deployed, and smoked.
+The Cloudflare Worker portal and GitHub write-broker slice are implemented, merged to `main`, deployed through a Cloudflare Workers route, and live-smoked at `https://gptpro-gh-workbench.eugnel.uk/`.
 
-The Worker route is designed as a constrained GitHub workbench broker:
+The Worker route is a constrained GitHub workbench broker:
 
 - `GET /` renders a compact browser dashboard.
 - `GET /api/status` reports service, repository, capability, executor, auth/write, and allowlisted endpoint status.
