@@ -12,8 +12,11 @@ const MAX_TEXT_BYTES = 65_536;
 const DEFAULT_MERGE_METHOD = "squash";
 const SESSION_COOKIE_NAME = "gptpro_workbench_session";
 const SESSION_QUERY_PARAM = "session";
+const WORKBENCH_SESSION_HEADER = "X-Workbench-Session";
+const WRITE_READY_PERMISSIONS = new Set(["ADMIN", "MAINTAIN", "WRITE"]);
 
 const READ_ENDPOINTS = [
+  "/api/action/readiness",
   "/api/status",
   "/api/github/auth",
   "/api/github/repo",
@@ -37,6 +40,13 @@ function buildActions(env = {}) {
   const writeEnabled = hasGitHubToken(env);
 
   return [
+  {
+    id: "workbench.action.readiness",
+    label: "Verify broker readiness before any GitHub action",
+    status: "enabled",
+    method: "GET",
+    endpoint: "/api/action/readiness"
+  },
   {
     id: "github.repo.read",
     label: "Read target repository metadata",
@@ -103,7 +113,7 @@ const SECURITY_HEADERS = {
 const CORS_HEADERS = {
   "Access-Control-Allow-Origin": "*",
   "Access-Control-Allow-Methods": "GET, POST, OPTIONS",
-  "Access-Control-Allow-Headers": "Accept, Content-Type",
+  "Access-Control-Allow-Headers": `Accept, Content-Type, ${WORKBENCH_SESSION_HEADER}`,
   "Access-Control-Max-Age": "86400"
 };
 
@@ -176,6 +186,12 @@ export async function handleRequest(request, env = {}, ctx = {}) {
       mode: hasGitHubToken(env) ? "github write broker" : "read-only without GH_TOKEN",
       actions: buildActions(env)
     }, 200, { cors: true });
+  }
+
+  if (url.pathname === "/api/action/readiness") {
+    const targetRepo = targetRepoFromQuery(url);
+    if (!targetRepo.ok) return githubResponse(targetRepo);
+    return githubResponse(await buildActionReadiness(env, targetRepo.value));
   }
 
   if (url.pathname === "/api/github/auth") {
@@ -261,6 +277,73 @@ export function parseLimit(value) {
   }
 
   return Math.min(parsed, MAX_GITHUB_LIMIT);
+}
+
+export async function buildActionReadiness(env = {}, targetRepo = TARGET_REPO) {
+  const statusPayload = buildStatus(env);
+  const actionsPayload = {
+    service: SERVICE_NAME,
+    mode: hasGitHubToken(env) ? "github write broker" : "read-only without GH_TOKEN",
+    actions: buildActions(env)
+  };
+  const checks = [
+    readinessCheck("/api/status", { ok: true, status: 200 }),
+    readinessCheck("/api/actions", { ok: true, status: 200 })
+  ];
+
+  const repo = await fetchGitHubJson(`/repos/${targetRepo}`, env);
+  checks.push(readinessCheck("/api/github/repo", repo));
+  if (!repo.ok) {
+    return readinessFailure(repo, checks, targetRepo, "github_upstream_failure", "Repository read check failed.");
+  }
+
+  const auth = await buildGitHubAuthStatus(env, targetRepo);
+  checks.push(readinessCheck("/api/github/auth", auth));
+  if (!auth.ok) {
+    return readinessFailure(
+      auth,
+      checks,
+      targetRepo,
+      auth.payload?.error || "github_auth_not_ready",
+      auth.payload?.message || "GitHub auth check failed."
+    );
+  }
+
+  const permission = auth.payload?.repository?.viewer_permission || "UNKNOWN";
+  if (!WRITE_READY_PERMISSIONS.has(permission)) {
+    return {
+      ok: false,
+      status: 403,
+      payload: {
+        ok: false,
+        classification: "insufficient_repository_permission",
+        message: "The authenticated GitHub viewer does not have write-capable permission for the target repository.",
+        target_repo: targetRepo,
+        viewer: auth.payload?.github_user?.login || null,
+        permission,
+        checks
+      }
+    };
+  }
+
+  return {
+    ok: true,
+    status: 200,
+    payload: {
+      ok: true,
+      classification: "broker_read_ready",
+      message: "Broker status, action list, repository read, and GitHub auth checks passed.",
+      target_repo: targetRepo,
+      viewer: auth.payload?.github_user?.login || null,
+      permission,
+      actions: actionsPayload.actions,
+      capability_mode: statusPayload.capability_mode,
+      auth_channel: WORKBENCH_SESSION_HEADER,
+      operation_model: "ChatGPT Pro API connector/action over fixed broker endpoints",
+      runtime_install_required: false,
+      checks
+    }
+  };
 }
 
 async function buildGitHubAuthStatus(env, targetRepo = TARGET_REPO) {
@@ -561,7 +644,7 @@ async function mergePullRequest(body, env, targetRepo) {
   const method = mergeMethod(body.method);
   if (!method.ok) return method;
 
-  const expectedHeadSha = optionalSha(body.expectedHeadSha ?? body.sha, "expectedHeadSha");
+  const expectedHeadSha = requiredSha(body.expectedHeadSha ?? body.sha, "expectedHeadSha");
   if (!expectedHeadSha.ok) return expectedHeadSha;
 
   const title = boundedText(body.title ?? body.commit_title ?? "", "title", 256);
@@ -688,6 +771,37 @@ function githubResponse(result) {
   return jsonResponse(result.payload, result.status, { cors: true });
 }
 
+function readinessCheck(endpoint, result) {
+  return {
+    endpoint,
+    status: result.status ?? null,
+    classification: result.ok ? "ok" : readinessClassification(result),
+    ok: Boolean(result.ok)
+  };
+}
+
+function readinessClassification(result) {
+  const error = result.payload?.error;
+  if (error === "github_request_failed") return "github_upstream_failure";
+  if (typeof error === "string" && error) return error;
+  return "broker_readiness_failure";
+}
+
+function readinessFailure(result, checks, targetRepo, classification, message) {
+  return {
+    ok: false,
+    status: result.status || 503,
+    payload: {
+      ok: false,
+      classification,
+      message,
+      target_repo: targetRepo,
+      checks,
+      payload: result.payload || {}
+    }
+  };
+}
+
 function hasGitHubToken(env = {}) {
   return Boolean(env.GH_TOKEN || env.GITHUB_TOKEN);
 }
@@ -753,6 +867,14 @@ function optionalSha(value, field) {
   }
 
   return { ok: true, value: value.toLowerCase() };
+}
+
+function requiredSha(value, field) {
+  if (value === undefined || value === null || value === "") {
+    return validationError(field, `${field} is required for guarded merges.`);
+  }
+
+  return optionalSha(value, field);
 }
 
 function boundedText(value, field, maxBytes, options = {}) {
@@ -941,7 +1063,12 @@ function getSessionContext(request, env = {}) {
 
   const url = new URL(request.url);
   const suppliedQueryToken = url.searchParams.get(SESSION_QUERY_PARAM);
+  const suppliedHeaderToken = request.headers.get(WORKBENCH_SESSION_HEADER);
   const suppliedCookieToken = readCookie(request.headers.get("Cookie"), SESSION_COOKIE_NAME);
+
+  if (safeEqual(suppliedHeaderToken, expected)) {
+    return { valid: true, source: "header", token: null };
+  }
 
   if (safeEqual(suppliedQueryToken, expected)) {
     return { valid: true, source: "query", token: suppliedQueryToken };
@@ -1020,6 +1147,7 @@ function htmlResponse(body, status = 200, options = {}) {
 function isSafeApiPath(pathname) {
   return [
     "/api/status",
+    "/api/action/readiness",
     "/api/actions",
     "/api/github/auth",
     "/api/github/repo",

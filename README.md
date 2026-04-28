@@ -11,6 +11,7 @@ The immediate target use case is KS2 Mastery (`fol2/ks2-mastery`), with this wor
 - `tests/workbench_docs.test.js` - documentation secret-scan and capability wording checks.
 - `tests/broker_probe_test.py` - Python unit coverage for the reusable broker probe client.
 - `wrangler.jsonc` - Cloudflare Worker configuration for `gptpro-gh-workbench`.
+- `docs/chatgpt-workbench-action.md` - ChatGPT Pro API connector/action contract and runbook.
 - `docs/ks2_workbench_broker_probe.py` - dependency-light probe client for signed workbench session URLs.
 - `docs/ks2-rest-broker-test-report-2026-04-28.md` - runtime test report and client-path blocker summary.
 - `docs/plan/ks2-github-workbench-establishment-plan.md` - original establishment brief.
@@ -25,7 +26,9 @@ The Cloudflare Worker portal and GitHub write-broker slice are implemented, merg
 
 The Worker route is a constrained GitHub workbench broker. The default target remains `fol2/ks2-mastery`; callers can select `fol2/gptpro-gh-workbench` with `repo=fol2/gptpro-gh-workbench` for read endpoints or `"repo": "fol2/gptpro-gh-workbench"` in write JSON bodies.
 
+- ChatGPT Pro should use the hosted API connector/action path described in `docs/chatgpt-workbench-action.md`. The first action call is `GET /api/action/readiness`, authenticated with `X-Workbench-Session`, and ChatGPT must stop unless the response returns `classification: "broker_read_ready"`.
 - `GET /` renders a compact browser dashboard.
+- `GET /api/action/readiness` runs the action read gate across status, actions, repository, and auth checks.
 - `GET /api/status` reports service, repository, capability, executor, auth/write, and allowlisted endpoint status.
 - `GET /api/github/auth` reports token-backed identity, selected target repository permission, and broker capabilities without returning the token.
 - `GET /api/github/repo` reads metadata for an allowlisted repository through GitHub's REST API.
@@ -39,7 +42,7 @@ The Worker route is a constrained GitHub workbench broker. The default target re
 - `POST /api/github/files` creates or updates one repository file on an `agent/...` branch.
 - `POST /api/github/pulls` creates a pull request from an `agent/...` branch into `main`.
 - `POST /api/github/pulls/close` closes a pull request by number for smoke cleanup.
-- `POST /api/github/pulls/merge` squash-merges an open, non-draft `agent/...` pull request into `main` after validating the target repository, base branch, and optional expected head SHA.
+- `POST /api/github/pulls/merge` squash-merges an open, non-draft `agent/...` pull request into `main` after validating the target repository, base branch, and required expected head SHA.
 
 The private executor is still not connected: the Worker does not run shell commands, local tests, arbitrary Git operations, or repo-native scripts. GitHub writes are limited to fixed REST API operations against allowlisted repositories using the Worker secret `GH_TOKEN`.
 
@@ -72,6 +75,12 @@ export KS2_WORKBENCH_SESSION_URL='<signed workbench session URL>'
 python3 docs/ks2_workbench_broker_probe.py
 ```
 
+To test the same header-auth path that the ChatGPT API action should use:
+
+```sh
+python3 docs/ks2_workbench_broker_probe.py --session-auth header --json
+```
+
 The default probe is read-only. The optional write smoke creates a temporary `agent/...` branch, writes a harmless smoke file, opens a temporary PR, closes that PR, and deletes the branch:
 
 ```sh
@@ -91,7 +100,7 @@ python3 docs/ks2_workbench_broker_probe.py --repo fol2/gptpro-gh-workbench --jso
 python3 docs/ks2_workbench_broker_probe.py --repo fol2/gptpro-gh-workbench --merge-pr 10 --expected-head-sha '<40-character-head-sha>' --json
 ```
 
-The broker defaults to a squash merge and accepts only open, non-draft `agent/...` pull requests targeting an allowlisted repository's `main` branch.
+The broker defaults to a squash merge and accepts only open, non-draft `agent/...` pull requests targeting an allowlisted repository's `main` branch. `expectedHeadSha` is required for every merge request.
 
 Do not provide or export a GitHub token to the probe runtime. The Worker already holds GitHub authority through its own secret.
 
@@ -111,7 +120,7 @@ Deploy to Cloudflare Workers:
 npm run deploy
 ```
 
-The Worker requires `WORKBENCH_SESSION_TOKEN` as a secret. Open the portal with either a short-lived `?session=...` link or a `gptpro_workbench_session` cookie matching that secret.
+The Worker requires `WORKBENCH_SESSION_TOKEN` as a secret. Open the portal with either a short-lived `?session=...` link or a `gptpro_workbench_session` cookie matching that secret. Hosted API action calls should send the same session capability with `X-Workbench-Session` so the signed session is not placed in action URLs.
 
 GitHub write endpoints require `GH_TOKEN` as a Worker secret. The token must not be committed, sent to the browser, placed in a Git remote URL, or included in API responses.
 
@@ -124,9 +133,10 @@ Set `WORKBENCH_DEPLOYMENT_STATUS` to the current deploy state, either as a Worke
 - No secrets are stored in code or configuration.
 - No GitHub token, write credential, or executor credential is accepted from callers, echoed, or returned by the Worker.
 - A valid workbench session token is required before the dashboard or API endpoints return data.
+- Hosted API action calls should authenticate with `X-Workbench-Session`; query-string sessions are retained for manual browser/debug use.
 - The GitHub API base is fixed to allowlisted repositories only: `fol2/ks2-mastery` and `fol2/gptpro-gh-workbench`.
 - Write endpoints reject direct `main` file writes, non-`agent/...` branches, workflow file edits, path traversal, oversized bodies, and non-JSON requests.
 - Cleanup endpoints are limited to closing pull requests by number and deleting validated `agent/...` branch refs; they do not expose generic Git reference management.
-- Merge authority is limited to open, non-draft `agent/...` pull requests from an allowlisted repository into that repository's `main`, using squash merge only. Callers can pin `expectedHeadSha` to reject stale merges.
+- Merge authority is limited to open, non-draft `agent/...` pull requests from an allowlisted repository into that repository's `main`, using squash merge only. Callers must provide `expectedHeadSha` so stale merges are rejected.
 - There is no arbitrary URL fetch, generic proxy, shell execution, executor command execution, direct-main file write endpoint, admin endpoint, secret endpoint, or workflow endpoint.
 - API responses include conservative security headers and CORS without credentials.

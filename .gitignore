@@ -6,3 +6,4 @@ dist/
 .env.*
 !.env.example
 .wrangler/
+__pycache__/

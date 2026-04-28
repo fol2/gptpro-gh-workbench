@@ -53,6 +53,7 @@ test("status payload declares broker boundaries without GH_TOKEN", async () => {
   assert.equal(payload.executor_status.connected, false);
   assert.equal(payload.auth_write_status.enabled, false);
   assert.deepEqual(payload.allowlisted_read_endpoints, buildStatus().allowlisted_read_endpoints);
+  assert.match(payload.allowlisted_read_endpoints.join(" "), /\/api\/action\/readiness/);
   assert.match(payload.allowlisted_write_endpoints.join(" "), /POST \/api\/github\/pulls/);
   assert.match(payload.allowlisted_write_endpoints.join(" "), /POST \/api\/github\/pulls\/merge/);
 });
@@ -95,7 +96,10 @@ test("actions endpoint reflects GH_TOKEN-backed write capability without exposin
 
   const writeAction = payload.actions.find((action) => action.id === "github.write");
   const executorAction = payload.actions.find((action) => action.id === "executor.command");
+  const readinessAction = payload.actions.find((action) => action.id === "workbench.action.readiness");
 
+  assert.equal(readinessAction.status, "enabled");
+  assert.equal(readinessAction.endpoint, "/api/action/readiness");
   assert.equal(writeAction.status, "enabled");
   assert.equal(executorAction.status, "disabled");
   assert.doesNotMatch(JSON.stringify(payload), /github_pat_testsecret/);
@@ -172,6 +176,7 @@ test("safe API endpoints send CORS without credentials", async () => {
 
   assert.equal(response.headers.get("access-control-allow-origin"), "*");
   assert.equal(response.headers.get("access-control-allow-credentials"), null);
+  assert.match(response.headers.get("access-control-allow-headers") ?? "", /X-Workbench-Session/);
 });
 
 test("dashboard and API require a valid workbench session", async () => {
@@ -193,6 +198,32 @@ test("cookie session is accepted without query token", async () => {
   }), TEST_ENV);
 
   assert.equal(response.status, 200);
+});
+
+test("workbench session header authenticates API requests without query tokens", async () => {
+  const response = await handleRequest(new Request(`${ORIGIN}/api/status`, {
+    headers: {
+      "X-Workbench-Session": "test-session"
+    }
+  }), TEST_ENV);
+  const payload = await response.json();
+
+  assert.equal(response.status, 200);
+  assert.equal(payload.target_repo, "fol2/ks2-mastery");
+  assert.equal(response.headers.get("set-cookie"), null);
+});
+
+test("safe API preflight allows the workbench session header", async () => {
+  const response = await handleRequest(new Request(`${ORIGIN}/api/action/readiness`, {
+    method: "OPTIONS",
+    headers: {
+      "Access-Control-Request-Headers": "X-Workbench-Session"
+    }
+  }), TEST_ENV);
+
+  assert.equal(response.status, 204);
+  assert.match(response.headers.get("access-control-allow-headers") ?? "", /X-Workbench-Session/);
+  assert.equal(response.headers.get("access-control-allow-credentials"), null);
 });
 
 test("cookie dashboard access does not echo the session token into links", async () => {
@@ -251,6 +282,92 @@ test("GitHub auth endpoint reports token-backed identity and repository permissi
     assert.equal(payload.capabilities.merge, "agent_pr_squash_only");
     assert.equal(calls[0].init.headers.Authorization, "Bearer github_pat_testsecret");
     assert.doesNotMatch(JSON.stringify(payload), /github_pat_testsecret/);
+  });
+});
+
+test("action readiness returns broker_read_ready after read and auth checks", async () => {
+  await withMockedFetch((url) => {
+    if (url === "https://api.github.com/user") {
+      return Response.json({ login: "fol2", id: 105634418 });
+    }
+
+    assert.equal(url, "https://api.github.com/repos/fol2/ks2-mastery");
+    return Response.json({
+      full_name: "fol2/ks2-mastery",
+      default_branch: "main",
+      permissions: { admin: true, push: true, pull: true }
+    });
+  }, async (calls) => {
+    const response = await handleRequest(new Request(`${ORIGIN}/api/action/readiness`, {
+      headers: {
+        "X-Workbench-Session": "test-session"
+      }
+    }), WRITE_ENV);
+    const payload = await response.json();
+
+    assert.equal(response.status, 200);
+    assert.equal(payload.ok, true);
+    assert.equal(payload.classification, "broker_read_ready");
+    assert.equal(payload.target_repo, "fol2/ks2-mastery");
+    assert.equal(payload.viewer, "fol2");
+    assert.equal(payload.permission, "ADMIN");
+    assert.equal(payload.auth_channel, "X-Workbench-Session");
+    assert.equal(payload.runtime_install_required, false);
+    assert.deepEqual(
+      payload.checks.map((check) => [check.endpoint, check.classification]),
+      [
+        ["/api/status", "ok"],
+        ["/api/actions", "ok"],
+        ["/api/github/repo", "ok"],
+        ["/api/github/auth", "ok"]
+      ]
+    );
+    assert.equal(calls.length, 3);
+    assert.doesNotMatch(JSON.stringify(payload), /github_pat_testsecret/);
+    assert.doesNotMatch(JSON.stringify(payload), /test-session/);
+  });
+});
+
+test("action readiness stops when GitHub auth is unavailable", async () => {
+  await withMockedFetch((url, init) => {
+    assert.equal(url, "https://api.github.com/repos/fol2/ks2-mastery");
+    assert.equal(init.headers.Authorization, undefined);
+    return Response.json({
+      full_name: "fol2/ks2-mastery",
+      default_branch: "main"
+    });
+  }, async (calls) => {
+    const response = await handleRequest(new Request(`${ORIGIN}/api/action/readiness${SESSION}`), TEST_ENV);
+    const payload = await response.json();
+
+    assert.equal(response.status, 503);
+    assert.equal(payload.ok, false);
+    assert.equal(payload.classification, "github_token_missing");
+    assert.equal(payload.target_repo, "fol2/ks2-mastery");
+    assert.equal(calls.length, 1);
+  });
+});
+
+test("action readiness rejects read-only repository permissions", async () => {
+  await withMockedFetch((url) => {
+    if (url === "https://api.github.com/user") {
+      return Response.json({ login: "fol2", id: 105634418 });
+    }
+
+    assert.equal(url, "https://api.github.com/repos/fol2/ks2-mastery");
+    return Response.json({
+      full_name: "fol2/ks2-mastery",
+      default_branch: "main",
+      permissions: { pull: true }
+    });
+  }, async () => {
+    const response = await handleRequest(new Request(`${ORIGIN}/api/action/readiness${SESSION}`), WRITE_ENV);
+    const payload = await response.json();
+
+    assert.equal(response.status, 403);
+    assert.equal(payload.ok, false);
+    assert.equal(payload.classification, "insufficient_repository_permission");
+    assert.equal(payload.permission, "READ");
   });
 });
 
@@ -317,11 +434,18 @@ test("repository allowlist rejects unknown read and write targets before GitHub 
       title: "Nope"
     });
     const writePayload = await write.json();
+    const readiness = await handleRequest(
+      new Request(`${ORIGIN}/api/action/readiness?repo=fol2%2Fnot-allowed&session=test-session`),
+      WRITE_ENV
+    );
+    const readinessPayload = await readiness.json();
 
     assert.equal(read.status, 400);
     assert.equal(readPayload.field, "repo");
     assert.equal(write.status, 400);
     assert.equal(writePayload.field, "repo");
+    assert.equal(readiness.status, 400);
+    assert.equal(readinessPayload.field, "repo");
   });
 });
 
@@ -547,6 +671,18 @@ test("merge validation rejects unsupported methods before GitHub calls", async (
   });
 });
 
+test("merge validation requires expected head SHA before GitHub calls", async () => {
+  await withMockedFetch(() => {
+    throw new Error("GitHub should not be called without expectedHeadSha");
+  }, async () => {
+    const response = await jsonPost("/api/github/pulls/merge", { number: 494 });
+    const payload = await response.json();
+
+    assert.equal(response.status, 400);
+    assert.equal(payload.field, "expectedHeadSha");
+  });
+});
+
 test("merge endpoint rejects non-agent or unsafe pull requests before merging", async () => {
   const cases = [
     {
@@ -602,7 +738,10 @@ test("merge endpoint rejects non-agent or unsafe pull requests before merging", 
       assert.equal(init.method, "GET");
       return Response.json({ number: 500 + index, ...testCase.body });
     }, async (calls) => {
-      const response = await jsonPost("/api/github/pulls/merge", { number: 500 + index });
+      const response = await jsonPost("/api/github/pulls/merge", {
+        number: 500 + index,
+        expectedHeadSha: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+      });
       const payload = await response.json();
 
       assert.equal(response.status, 400);
