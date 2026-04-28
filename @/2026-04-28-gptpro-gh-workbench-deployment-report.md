@@ -2,7 +2,8 @@
 
 Date: 2026-04-28
 Repository: `fol2/gptpro-gh-workbench`
-Target workbench subject: `fol2/ks2-mastery`
+Default workbench subject: `fol2/ks2-mastery`
+Allowlisted workbench repositories: `fol2/ks2-mastery`, `fol2/gptpro-gh-workbench`
 Public portal URL: `https://gptpro-gh-workbench.eugnel.uk/`
 Signed session URL storage: `~/.config/gptpro-gh-workbench/session-url.txt`
 
@@ -10,13 +11,13 @@ Signed session URL storage: `~/.config/gptpro-gh-workbench/session-url.txt`
 
 The GPTPro GitHub Workbench project has been created as a separate public GitHub repository under `fol2`, implemented as a session-protected Cloudflare Worker portal, reviewed through independent SDLC gates, merged to remote `main`, deployed through a Cloudflare Workers route, and live-smoked at a public URL.
 
-The follow-up GitHub write-broker slice is now merged, deployed, and live-smoked. The live surface is deliberately conservative but no longer merely read-only: it lets ChatGPT or a human inspect a constrained status dashboard, call fixed GitHub read endpoints for `fol2/ks2-mastery`, and use a small set of session-protected GitHub write endpoints backed by a Worker secret `GH_TOKEN`. It does not accept GitHub tokens from callers, does not return tokens, does not run shell commands, does not expose arbitrary URL proxying, does not connect a private executor, and does not provide merge, workflow, admin, secret, or direct-main-write operations.
+The follow-up GitHub write-broker slice is now merged, deployed, and live-smoked. The live surface is deliberately conservative but no longer merely read-only: it lets ChatGPT or a human inspect a constrained status dashboard, call fixed GitHub read endpoints for allowlisted repositories, and use a small set of session-protected GitHub write endpoints backed by a Worker secret `GH_TOKEN`. It does not accept GitHub tokens from callers, does not return tokens, does not run shell commands, does not expose arbitrary URL proxying, does not connect a private executor, and limits merge authority to guarded squash merges of open non-draft `agent/...` pull requests into `main`.
 
 The first live fallback used a temporary Cloudflare Tunnel while the local Wrangler OAuth session was inactive. After the Cloudflare OAuth approval was completed, the Worker was deployed officially and bound to `gptpro-gh-workbench.eugnel.uk/*` as a Cloudflare Workers route. The tunnel fallback was stopped and the named tunnel was deleted before the final smoke, so the current URL is served by Cloudflare Workers rather than by a local tunnel.
 
 ## Follow-Up Branch Note
 
-This report's live-smoke evidence describes the deployed PR #5 write-broker slice. A later implementation branch adds a reusable signed-session probe client plus constrained cleanup endpoints for closing temporary PRs and deleting validated `agent/...` branches. Those additions should not be treated as live-deployed until the branch is merged, deployed, and smoked with an updated `WORKBENCH_DEPLOYMENT_STATUS`.
+This report's original live-smoke evidence described the deployed PR #5 write-broker slice. Later branches added a reusable signed-session probe client, constrained cleanup endpoints, guarded merge support, and the `fol2/gptpro-gh-workbench` repository allowlist for maintaining the broker through the broker itself.
 
 ## What Is Working Now
 
@@ -28,10 +29,10 @@ This report's live-smoke evidence describes the deployed PR #5 write-broker slic
 - Dashboard JSON endpoint links preserve the signed-session query so a URL-first client can inspect them without immediately dropping auth.
 - `GET /api/status` reports portal capability and exposes deployment status from `WORKBENCH_DEPLOYMENT_STATUS`.
 - `GET /api/github/auth` reports token-backed GitHub identity and repository permission without exposing the token.
-- `GET /api/github/repo` reads metadata for `fol2/ks2-mastery` and returns `default_branch: main`.
+- `GET /api/github/repo` reads metadata for an allowlisted repository and returns `default_branch: main`.
 - Unauthenticated requests to the status API return `401`.
 - Official Worker secrets are set for `WORKBENCH_SESSION_TOKEN`, `WORKBENCH_DEPLOYMENT_STATUS`, and `GH_TOKEN`.
-- GitHub write access is connected through allowlisted REST API operations only: issue creation, issue/PR comment creation, `agent/...` branch creation from `main`, single-file create/update on `agent/...` branches, and PR creation from `agent/...` branches.
+- GitHub write access is connected through allowlisted REST API operations only: issue creation, issue/PR comment creation, `agent/...` branch creation from `main`, single-file create/update on `agent/...` branches, PR creation from `agent/...` branches, smoke cleanup, and guarded squash merges of open non-draft `agent/...` pull requests.
 - The private executor remains absent; local checkout inspection, `git`, `npm test`, repo-native scripts, and arbitrary shell commands are still not exposed through the public Worker.
 
 The signed session URL is intentionally not committed to the repository. It is stored locally with `0600` permissions at:
@@ -264,4 +265,4 @@ The private executor should be responsible for clone/fetch, local diffs, `npm te
 
 ## Bottom Line
 
-The project is real, public, merged, deployed, and reachable through a working Cloudflare Workers URL. The write-broker slice turns that URL into a safe session-protected GitHub workbench broker: it proves GitHub auth and has performed constrained branch, file, and PR operations against `fol2/ks2-mastery` without exposing a token or shell. The remaining gap is private executor capability for local checkout work and verification.
+The project is real, public, merged, deployed, and reachable through a working Cloudflare Workers URL. The write-broker slice turns that URL into a safe session-protected GitHub workbench broker: it proves GitHub auth and has performed constrained branch, file, PR, cleanup, and guarded merge operations against allowlisted repositories without exposing a token or shell. The remaining gap is private executor capability for local checkout work and verification.

@@ -45,6 +45,7 @@ test("status payload declares broker boundaries without GH_TOKEN", async () => {
   assert.equal(payload.service, "GPTPro GitHub Workbench Portal");
   assert.equal(payload.project_repo, "fol2/gptpro-gh-workbench");
   assert.equal(payload.target_repo, "fol2/ks2-mastery");
+  assert.deepEqual(payload.allowed_target_repos, ["fol2/ks2-mastery", "fol2/gptpro-gh-workbench"]);
   assert.equal(payload.capability_mode, "read-only without GH_TOKEN");
   assert.equal(payload.portal_status, "responding/read-only without GH_TOKEN");
   assert.equal(payload.deployment_status, "not claimed until deployed and live-smoked");
@@ -131,6 +132,24 @@ test("GitHub PR route uses fixed repository API base and capped limit", async ()
     assert.equal(calls[0].init.headers["User-Agent"], "gptpro-gh-workbench-broker");
     assert.equal(calls[0].init.headers.Authorization, undefined);
     assert.deepEqual(payload, [{ number: 12, title: "Open PR" }]);
+    }
+  );
+});
+
+test("GitHub read routes can target the allowlisted workbench repository", async () => {
+  await withMockedFetch(
+    () => Response.json({ full_name: "fol2/gptpro-gh-workbench", default_branch: "main" }),
+    async (calls) => {
+    const response = await handleRequest(
+      new Request(`${ORIGIN}/api/github/repo?repo=fol2%2Fgptpro-gh-workbench${SESSION.replace("?", "&")}`),
+      WRITE_ENV
+    );
+    const payload = await response.json();
+
+    assert.equal(response.status, 200);
+    assert.equal(calls.length, 1);
+    assert.equal(calls[0].url, "https://api.github.com/repos/fol2/gptpro-gh-workbench");
+    assert.equal(payload.full_name, "fol2/gptpro-gh-workbench");
     }
   );
 });
@@ -284,6 +303,28 @@ test("write validation rejects unsafe branches and workflow paths", async () => 
   assert.equal(workflowPayload.field, "path");
 });
 
+test("repository allowlist rejects unknown read and write targets before GitHub calls", async () => {
+  await withMockedFetch(() => {
+    throw new Error("GitHub should not be called for unknown repositories");
+  }, async () => {
+    const read = await handleRequest(
+      new Request(`${ORIGIN}/api/github/repo?repo=fol2%2Fnot-allowed${SESSION.replace("?", "&")}`),
+      WRITE_ENV
+    );
+    const readPayload = await read.json();
+    const write = await jsonPost("/api/github/issues", {
+      repo: "fol2/not-allowed",
+      title: "Nope"
+    });
+    const writePayload = await write.json();
+
+    assert.equal(read.status, 400);
+    assert.equal(readPayload.field, "repo");
+    assert.equal(write.status, 400);
+    assert.equal(writePayload.field, "repo");
+  });
+});
+
 test("issue and comment write endpoints call fixed GitHub repository APIs", async () => {
   await withMockedFetch((url, init) => {
     if (url.endsWith("/issues")) {
@@ -307,6 +348,29 @@ test("issue and comment write endpoints call fixed GitHub repository APIs", asyn
     assert.equal(commentPayload.id, 20);
     assert.equal(calls.length, 2);
     assert.equal(calls[0].init.headers.Authorization, "Bearer github_pat_testsecret");
+  });
+});
+
+test("write endpoints can target the allowlisted workbench repository", async () => {
+  await withMockedFetch((url, init) => {
+    assert.equal(url, "https://api.github.com/repos/fol2/gptpro-gh-workbench/issues");
+    assert.equal(init.method, "POST");
+    assert.deepEqual(JSON.parse(init.body), {
+      title: "Workbench repo issue",
+      body: "Created by broker"
+    });
+    return Response.json({ number: 15, html_url: "https://github.com/fol2/gptpro-gh-workbench/issues/15" }, { status: 201 });
+  }, async (calls) => {
+    const issue = await jsonPost("/api/github/issues", {
+      repo: "fol2/gptpro-gh-workbench",
+      title: "Workbench repo issue",
+      body: "Created by broker"
+    });
+    const issuePayload = await issue.json();
+
+    assert.equal(issue.status, 200);
+    assert.equal(issuePayload.number, 15);
+    assert.equal(calls.length, 1);
   });
 });
 

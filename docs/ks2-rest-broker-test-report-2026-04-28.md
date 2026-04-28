@@ -2,12 +2,13 @@
 
 Date: 2026-04-28
 Project repository: `fol2/gptpro-gh-workbench`
-Target repository: `fol2/ks2-mastery`
+Default target repository: `fol2/ks2-mastery`
+Allowlisted repositories: `fol2/ks2-mastery`, `fol2/gptpro-gh-workbench`
 Broker URL: `https://gptpro-gh-workbench.eugnel.uk/`
 
 ## Summary
 
-The broker appears correctly built and deployed as a constrained Cloudflare Worker for `fol2/ks2-mastery`, but this runtime could not operate it end-to-end. The confirmed blocker was the client path from the current session to the broker, not the GitHub token held by the Worker.
+The broker appears correctly built and deployed as a constrained Cloudflare Worker for allowlisted repositories, but this runtime could not operate it end-to-end. The confirmed blocker was the client path from the current session to the broker, not the GitHub token held by the Worker.
 
 ## Confirmed
 
@@ -27,7 +28,7 @@ The broker appears correctly built and deployed as a constrained Cloudflare Work
 
 Capable of:
 
-- Read status/auth/repo/issues/PRs.
+- Read status/auth/repo/issues/PRs for allowlisted repositories.
 - Create an issue.
 - Comment on an issue or PR number.
 - Create an `agent/...` branch.
@@ -35,7 +36,7 @@ Capable of:
 - Open a PR from an `agent/...` branch.
 - Close a temporary PR by number.
 - Delete a validated `agent/...` branch for cleanup.
-- Squash-merge an open, non-draft `agent/...` PR into `main` when explicitly called with a PR number and optional expected head SHA.
+- Squash-merge an open, non-draft `agent/...` PR into an allowlisted repository's `main` when explicitly called with a PR number and optional expected head SHA.
 
 Not yet capable of:
 

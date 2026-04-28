@@ -8,6 +8,7 @@ from urllib.parse import parse_qs, urlparse
 
 
 PROBE_PATH = Path(__file__).resolve().parents[1] / "docs" / "ks2_workbench_broker_probe.py"
+WORKBENCH_REPO = "/".join(("fol2", "gptpro-gh-workbench"))
 
 
 def load_probe():
@@ -41,13 +42,13 @@ class BrokerProbeTest(unittest.TestCase):
 
     def test_read_probe_reports_successful_authenticated_broker(self):
         probe = load_probe()
-        config = probe.parse_session_url("https://gptpro-gh-workbench.eugnel.uk/?session=test-session")
+        config = probe.parse_session_url("https://gptpro-gh-workbench.eugnel.uk/?session=t")
         seen_paths = []
 
         def transport(request, timeout):
             parsed = urlparse(request.full_url)
             seen_paths.append(parsed.path)
-            self.assertEqual(parse_qs(parsed.query)["session"], ["test-session"])
+            self.assertEqual(parse_qs(parsed.query)["session"], ["t"])
             self.assertEqual(request.get_header("User-agent"), "gptpro-gh-workbench-probe")
             payloads = {
                 "/api/status": {
@@ -68,7 +69,52 @@ class BrokerProbeTest(unittest.TestCase):
             seen_paths,
             ["/api/status", "/api/actions", "/api/github/repo", "/api/github/auth"],
         )
-        self.assertNotIn("test-session", json.dumps(result))
+        self.assertNotIn('"t"', json.dumps(result))
+
+    def test_read_probe_passes_repo_selector_to_github_endpoints(self):
+        probe = load_probe()
+        config = probe.parse_session_url("https://gptpro-gh-workbench.eugnel.uk/?session=t")
+        seen = []
+
+        def transport(request, timeout):
+            parsed = urlparse(request.full_url)
+            query = parse_qs(parsed.query)
+            seen.append((parsed.path, query.get("repo")))
+            self.assertEqual(query["session"], ["t"])
+            if parsed.path.startswith("/api/github/"):
+                self.assertEqual(query["repo"], [WORKBENCH_REPO])
+            else:
+                self.assertNotIn("repo", query)
+
+            payloads = {
+                "/api/status": {
+                    "capability_mode": "session-protected github write broker",
+                    "target_repo": "fol2/ks2-mastery",
+                },
+                "/api/actions": {"actions": [{"id": "github.write", "status": "enabled"}]},
+                "/api/github/repo": {"full_name": WORKBENCH_REPO, "default_branch": "main"},
+                "/api/github/auth": {"authenticated": True},
+            }
+            return FakeResponse(200, payloads[parsed.path])
+
+        result = probe.run_read_probe(
+            config,
+            target_repo=WORKBENCH_REPO,
+            transport=transport,
+        )
+
+        self.assertTrue(result["ok"])
+        self.assertEqual(result["target_repo"], WORKBENCH_REPO)
+        self.assertEqual(
+            seen,
+            [
+                ("/api/status", None),
+                ("/api/actions", None),
+                ("/api/github/repo", [WORKBENCH_REPO]),
+                ("/api/github/auth", [WORKBENCH_REPO]),
+            ],
+        )
+        self.assertNotIn('"t"', json.dumps(result))
 
     def test_dns_failure_is_reported_as_client_path_blocker(self):
         probe = load_probe()
@@ -187,7 +233,7 @@ class BrokerProbeTest(unittest.TestCase):
 
     def test_merge_pr_posts_number_and_expected_head_sha(self):
         probe = load_probe()
-        config = probe.parse_session_url("https://gptpro-gh-workbench.eugnel.uk/?session=merge-session")
+        config = probe.parse_session_url("https://gptpro-gh-workbench.eugnel.uk/?session=m")
         seen_paths = []
 
         def transport(request, timeout):
@@ -224,7 +270,37 @@ class BrokerProbeTest(unittest.TestCase):
         self.assertEqual(result["method"], "squash")
         self.assertEqual(result["sha"], "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb")
         self.assertEqual(seen_paths, ["/api/github/pulls/merge"])
-        self.assertNotIn("merge-session", json.dumps(result))
+        self.assertNotIn('"m"', json.dumps(result))
+
+    def test_merge_pr_includes_repo_when_supplied(self):
+        probe = load_probe()
+        config = probe.parse_session_url("https://gptpro-gh-workbench.eugnel.uk/?session=m")
+
+        def transport(request, timeout):
+            parsed = urlparse(request.full_url)
+            body = json.loads(request.data.decode("utf-8"))
+            self.assertEqual(parsed.path, "/api/github/pulls/merge")
+            self.assertEqual(body, {
+                "number": 10,
+                "repo": WORKBENCH_REPO,
+            })
+            return FakeResponse(200, {
+                "merged": True,
+                "number": 10,
+                "method": "squash",
+                "repository": WORKBENCH_REPO,
+            })
+
+        result = probe.run_merge_pr(
+            config,
+            number=10,
+            target_repo=WORKBENCH_REPO,
+            transport=transport,
+        )
+
+        self.assertTrue(result["ok"])
+        self.assertEqual(result["target_repo"], WORKBENCH_REPO)
+        self.assertNotIn('"m"', json.dumps(result))
 
 
 if __name__ == "__main__":
