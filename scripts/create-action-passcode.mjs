@@ -8,8 +8,8 @@ const DEFAULT_BASE_URL = "https://gptpro-gh-workbench.eugnel.uk";
 const DEFAULT_REPO = "fol2/ks2-mastery";
 const DEFAULT_TOKEN_FILE = path.join(homedir(), ".config", "gptpro-gh-workbench", "session-token");
 const DEFAULT_TTL_SECONDS = 600;
-const DEFAULT_SESSION_TTL_SECONDS = 1800;
-const DEFAULT_MAX_REQUESTS = 50;
+const DEFAULT_SESSION_TTL_SECONDS = 18_000;
+const DEFAULT_MAX_REQUESTS = 500;
 
 const USAGE = `Usage:
   npm run passcode -- <repo>
@@ -22,7 +22,7 @@ Options:
   --base-url <url>                Workbench URL. Defaults to ${DEFAULT_BASE_URL}.
   --token-file <path>             Session token file. Defaults to ${DEFAULT_TOKEN_FILE}.
   --ttl-seconds <seconds>         One-time passcode lifetime. Defaults to ${DEFAULT_TTL_SECONDS}.
-  --session-ttl-seconds <seconds> Action session lifetime after exchange. Defaults to ${DEFAULT_SESSION_TTL_SECONDS}.
+  --session-ttl-seconds <seconds> Action session lifetime after exchange. Defaults to ${DEFAULT_SESSION_TTL_SECONDS} (300 minutes).
   --max-requests <count>          Action session request limit. Defaults to ${DEFAULT_MAX_REQUESTS}.
   --read-only                     Create a read-only action session.
   --write                         Create a write-capable action session. This is the default.

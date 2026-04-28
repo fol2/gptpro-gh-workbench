@@ -89,7 +89,7 @@ Create a one-time passcode for ChatGPT without hand-writing curl:
 npm run passcode -- fol2/ks2-mastery
 ```
 
-That command reads `~/.config/gptpro-gh-workbench/session-token`, creates a write-capable non-merge action session passcode for the selected repository, and prints only the passcode. Optional flags are available for narrower or explicit scopes:
+That command reads `~/.config/gptpro-gh-workbench/session-token`, creates a write-capable non-merge action session passcode for the selected repository, and prints only the passcode. After exchange, the default action session lasts 300 minutes and allows up to 500 requests. Optional flags are available for narrower or explicit scopes:
 
 ```sh
 npm run passcode -- fol2/gptpro-gh-workbench --read-only

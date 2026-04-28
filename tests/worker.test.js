@@ -477,6 +477,34 @@ test("workbench session can create a one-time action passcode without storing it
   }
 });
 
+test("action passcode defaults create 300-minute sessions with 500 requests", async () => {
+  const env = actionEnv();
+  const payload = await createPasscode(env);
+
+  assert.equal(payload.scope.repo, "fol2/ks2-mastery");
+  assert.equal(payload.scope.read, true);
+  assert.equal(payload.scope.write, true);
+  assert.equal(payload.scope.merge, false);
+  assert.equal(payload.scope.maxRequests, 500);
+  assert.equal(payload.scope.sessionTtlSeconds, 18000);
+});
+
+test("action passcode validation caps exchanged session size", async () => {
+  const tooLong = await jsonPost("/api/action/passcodes", {
+    sessionTtlSeconds: 18001
+  }, actionEnv());
+  const tooLongPayload = await tooLong.json();
+  const tooMany = await jsonPost("/api/action/passcodes", {
+    maxRequests: 501
+  }, actionEnv());
+  const tooManyPayload = await tooMany.json();
+
+  assert.equal(tooLong.status, 400);
+  assert.equal(tooLongPayload.field, "sessionTtlSeconds");
+  assert.equal(tooMany.status, 400);
+  assert.equal(tooManyPayload.field, "maxRequests");
+});
+
 test("action passcode exchange is one-time and returns a short-lived action session", async () => {
   const env = actionEnv();
   const passcodePayload = await createPasscode(env, { maxRequests: 3, write: true });

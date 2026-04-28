@@ -55,8 +55,8 @@ Content-Type: application/json
   "repo": "fol2/ks2-mastery",
   "write": true,
   "merge": false,
-  "maxRequests": 50,
-  "sessionTtlSeconds": 1800
+  "maxRequests": 500,
+  "sessionTtlSeconds": 18000
 }
 ```
 
@@ -80,7 +80,7 @@ Content-Type: application/json
 }
 ```
 
-The `actionSession` is still constrained: it is short-lived, request-limited, repository-bound, and scope-bound. It does not reveal `GH_TOKEN` or the workbench session.
+The `actionSession` is still constrained: it is short-lived, request-limited, repository-bound, and scope-bound. The default exchanged session lasts 300 minutes and allows up to 500 requests. It does not reveal `GH_TOKEN` or the workbench session.
 
 ## First Action: Readiness
 
