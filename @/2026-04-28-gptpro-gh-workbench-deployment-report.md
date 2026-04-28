@@ -8,9 +8,9 @@ Signed session URL storage: `~/.config/gptpro-gh-workbench/session-url.txt`
 
 ## Executive Summary
 
-The GPTPro GitHub Workbench project has been created as a separate public GitHub repository under `fol2`, implemented as a session-protected read-only Cloudflare Worker portal, reviewed through independent SDLC gates, merged to remote `main`, deployed through a Cloudflare Workers route, and live-smoked at a public URL.
+The GPTPro GitHub Workbench project has been created as a separate public GitHub repository under `fol2`, implemented as a session-protected Cloudflare Worker portal, reviewed through independent SDLC gates, merged to remote `main`, deployed through a Cloudflare Workers route, and live-smoked at a public URL.
 
-The current live surface is deliberately conservative. It lets ChatGPT or a human inspect a constrained status dashboard and fixed GitHub read endpoints for `fol2/ks2-mastery`. It does not accept GitHub tokens, does not run shell commands, does not expose arbitrary URL proxying, does not connect a private executor, and does not perform GitHub write actions.
+This report now includes the follow-up GitHub write-broker slice. Before the write-broker PR is merged and deployed, the public URL should still be treated as the previously live read-only portal. After merge and deployment, the intended live surface is deliberately conservative but no longer merely read-only: it lets ChatGPT or a human inspect a constrained status dashboard, call fixed GitHub read endpoints for `fol2/ks2-mastery`, and use a small set of session-protected GitHub write endpoints backed by a Worker secret `GH_TOKEN`. It does not accept GitHub tokens from callers, does not return tokens, does not run shell commands, does not expose arbitrary URL proxying, does not connect a private executor, and does not provide merge, workflow, admin, secret, or direct-main-write operations.
 
 The first live fallback used a temporary Cloudflare Tunnel while the local Wrangler OAuth session was inactive. After the Cloudflare OAuth approval was completed, the Worker was deployed officially and bound to `gptpro-gh-workbench.eugnel.uk/*` as a Cloudflare Workers route. The tunnel fallback was stopped and the named tunnel was deleted before the final smoke, so the current URL is served by Cloudflare Workers rather than by a local tunnel.
 
@@ -22,11 +22,13 @@ The first live fallback used a temporary Cloudflare Tunnel while the local Wrang
 - The portal requires a valid workbench session token before dashboard or API data is returned.
 - The signed dashboard sets a `gptpro_workbench_session` cookie with `HttpOnly`, `SameSite=Strict`, and `Secure`.
 - Dashboard JSON endpoint links preserve the signed-session query so a URL-first client can inspect them without immediately dropping auth.
-- `GET /api/status` reports the portal as a read-only foundation and exposes deployment status from `WORKBENCH_DEPLOYMENT_STATUS`.
-- `GET /api/github/repo` reads public metadata for `fol2/ks2-mastery` and returns `default_branch: main`.
+- `GET /api/status` reports portal capability and exposes deployment status from `WORKBENCH_DEPLOYMENT_STATUS`.
+- `GET /api/github/auth` reports token-backed GitHub identity and repository permission without exposing the token.
+- `GET /api/github/repo` reads metadata for `fol2/ks2-mastery` and returns `default_branch: main`.
 - Unauthenticated requests to the status API return `401`.
-- Official Worker secrets are set for `WORKBENCH_SESSION_TOKEN` and `WORKBENCH_DEPLOYMENT_STATUS`.
-- GitHub write access is not connected yet; future branch, PR, issue, comment, or merge actions require a scoped GitHub token in the private executor layer.
+- Official Worker secrets are set for `WORKBENCH_SESSION_TOKEN`, `WORKBENCH_DEPLOYMENT_STATUS`, and `GH_TOKEN`.
+- GitHub write access is connected through allowlisted REST API operations only: issue creation, issue/PR comment creation, `agent/...` branch creation from `main`, single-file create/update on `agent/...` branches, and PR creation from `agent/...` branches.
+- The private executor remains absent; local checkout inspection, `git`, `npm test`, repo-native scripts, and arbitrary shell commands are still not exposed through the public Worker.
 
 The signed session URL is intentionally not committed to the repository. It is stored locally with `0600` permissions at:
 
@@ -57,6 +59,9 @@ The signed session URL is intentionally not committed to the repository. It is s
 14. Deployed the Worker through Wrangler using a Worker route on `gptpro-gh-workbench.eugnel.uk/*`.
 15. Uploaded Worker secrets for `WORKBENCH_SESSION_TOKEN` and `WORKBENCH_DEPLOYMENT_STATUS`.
 16. Stopped the local Worker runtime and tunnel fallback, then live-smoked the public URL again to prove the Cloudflare Worker route was serving traffic.
+17. Created a scoped GitHub token for `fol2`, stored it locally with `0600` permissions, verified `gh auth status`, and uploaded it to the Worker as `GH_TOKEN`.
+18. Implemented the write-broker slice on a separate worktree branch with fixed `fol2/ks2-mastery` REST API writes and no shell path.
+19. Sent the slice through independent security and functional reviewers. Review follow-up fixed file-content trimming, non-object JSON handling, anonymous read endpoint regression risk, and documentation timing.
 
 ## Merged Pull Requests
 
@@ -65,6 +70,8 @@ The signed session URL is intentionally not committed to the repository. It is s
   - Merge commit: `f7c6dbb026299e0d09da5dddcc7ca1b9b3314561`
 - PR #3: secure session cookie hotfix merged to `main`.
   - Merge commit: `fed2b4126527d53b44fdb4d13ebbf5a492c5ba50`
+- PR #4: deployment report and Worker route configuration merged to `main`.
+- PR #5: GitHub write-broker slice, pending merge/deploy at the time this report section was drafted.
 
 ## Runtime Architecture
 
@@ -76,7 +83,7 @@ ChatGPT / browser
   -> Cloudflare DNS
   -> Cloudflare Workers route: gptpro-gh-workbench.eugnel.uk/*
   -> Worker script: gptpro-gh-workbench
-  -> fixed GitHub REST API reads for fol2/ks2-mastery
+  -> fixed GitHub REST API reads and allowlisted writes for fol2/ks2-mastery
 ```
 
 This is now a Cloudflare Workers route deployment. It no longer depends on the local Mac, `tmux`, a local Wrangler dev process, or a running `cloudflared` tunnel for the public URL.
@@ -88,7 +95,7 @@ Local operational files kept for recovery and session URL reference:
 ~/.config/gptpro-gh-workbench/session-url.txt
 ```
 
-The Worker-side session secret is stored in Cloudflare as `WORKBENCH_SESSION_TOKEN`. The local token file is only a local reference for the signed URL and should not be committed.
+The Worker-side session secret is stored in Cloudflare as `WORKBENCH_SESSION_TOKEN`. The GitHub credential is stored in Cloudflare as `GH_TOKEN`. Local token files are only recovery references for operation and should not be committed.
 
 The earlier tunnel fallback used a short-lived local env file:
 
@@ -100,7 +107,7 @@ It is no longer required for the public URL, but remains useful if a local fallb
 
 ## Live Smoke Evidence
 
-Latest live-smoke result after official Worker route deployment and after stopping the local tunnel/runtime fallback:
+Latest live-smoke result after the original official Worker route deployment and after stopping the local tunnel/runtime fallback:
 
 ```text
 unauthenticated /api/status: 401
@@ -142,6 +149,17 @@ Set-Cookie HttpOnly: present
 Set-Cookie SameSite=Strict: present
 ```
 
+Write-broker live-smoke evidence must be refreshed after the write-broker PR is merged and deployed. The expected post-deploy checks are:
+
+```text
+unauthenticated /api/status: 401
+authenticated /api/status: 200
+authenticated /api/github/auth: 200
+authenticated /api/github/repo: 200
+authenticated dashboard contains narrow broker copy
+authenticated responses do not contain GH_TOKEN or token prefixes
+```
+
 ## Verification Commands
 
 Across the implementation and hotfix PRs, the following checks passed:
@@ -154,11 +172,12 @@ npm audit --omit=dev
 npm audit --audit-level=high
 ```
 
-Final `main` verification after PR #3:
+Final verification after the GitHub write-broker slice:
 
 ```text
-npm test: 14/14 passed
+npm test: 20/20 passed
 npm run check: passed
+git diff --check: passed
 ```
 
 Independent reviewers also ran targeted curl and Wrangler dry-run checks. The final security review for PR #2 found no blockers, and the PR #3 hotfix review found no blockers.
@@ -168,29 +187,34 @@ Independent reviewers also ran targeted curl and Wrangler dry-run checks. The fi
 Confirmed boundaries in the current implementation:
 
 - No direct pushes to `main` were used for product changes.
-- No GitHub token is accepted by the portal.
+- No GitHub token is accepted from callers by the portal.
 - No GitHub token is echoed by the portal.
-- No repository write operation is enabled.
+- Repository write operations are allowlisted and fixed to `fol2/ks2-mastery`.
+- Direct writes to `main` are rejected.
+- Branch writes are limited to `agent/...` branches.
+- Workflow file edits under `.github/workflows/` are rejected.
+- Path traversal, absolute paths, non-JSON bodies, and oversized request bodies are rejected.
+- Merge, deployment, repository admin, secret, billing, and workflow-management endpoints are not exposed.
 - No shell, subprocess, or executor command path exists.
 - No arbitrary URL fetch path exists.
 - GitHub API reads are fixed to `https://api.github.com/repos/fol2/ks2-mastery`.
 - Session gating happens before dashboard/API data routes.
-- Read-only CORS is enabled without credentials.
+- CORS is enabled without credentials.
 - GitHub upstream failures are not returned as false HTTP 200 success responses.
 - `workers_dev` is disabled in the Worker config.
 
-The main residual exposure is capability-related rather than deployment-related: the current Worker is intentionally read-only, so the future GitHub write/executor layer still needs a scoped credential and its own audit boundary.
+The main residual exposure is capability-related rather than deployment-related: once this slice is deployed, the Worker can perform constrained GitHub API writes, but it still cannot run local verification, inspect a full checkout, or execute repo-native scripts. Full SDLC automation still needs a private executor behind the portal.
 
-## GitHub Write-Access Blocker
+## GitHub Write Access
 
-Cloudflare deployment is complete. The remaining blocker for the broader "ChatGPT interacts with GitHub" vision is GitHub write access.
+Cloudflare deployment is complete for the original portal, and GitHub authentication has been connected through a Worker secret for the write-broker slice.
 
 Cloudflare authentication and GitHub authentication are separate:
 
 - Cloudflare auth deploys and configures the Worker.
-- GitHub auth is required before an executor can create branches, push commits, open PRs, comment on PRs/issues, or merge.
+- GitHub auth is required before a broker or executor can create branches, open PRs, or comment on PRs/issues.
 
-The preferred credential is a GitHub App installation token scoped only to the required repository and permissions. The short-term alternative is a fine-grained PAT scoped only to the target repository. It should be exposed to the private executor as `GH_TOKEN` or `GITHUB_TOKEN`; it should not be embedded in the Git remote URL, committed to the repository, or returned by the public Worker.
+The current short-term credential is a fine-grained PAT exposed only as `GH_TOKEN` in the Worker environment and local operator store. It is not embedded in the Git remote URL, committed to the repository, accepted from callers, or returned by the public Worker. A GitHub App installation token remains the preferred long-term credential model because it can be rotated and scoped more cleanly.
 
 The earlier Cloudflare auth errors were resolved by completing `wrangler login`:
 
@@ -206,20 +230,21 @@ The final deploy path used:
 npx wrangler deploy --route 'gptpro-gh-workbench.eugnel.uk/*'
 npx wrangler secret put WORKBENCH_SESSION_TOKEN
 npx wrangler secret put WORKBENCH_DEPLOYMENT_STATUS
+npx wrangler secret put GH_TOKEN
 ```
 
 ## Recommended Next Step
 
-The next engineering slice should connect a private executor behind a narrow action broker. It should preserve the current public contract:
+The next engineering slice should connect a private executor behind the existing narrow action broker. It should preserve the current public contract:
 
 - URL-first dashboard and JSON status remain browser-readable after session auth.
 - No generic shell or arbitrary proxy is introduced.
 - GitHub actions are allowlisted.
-- GitHub write credentials stay outside the public Worker.
+- GitHub write credentials stay outside browser-visible surfaces.
 - Every state-changing action has explicit audit output and an approval boundary.
 
-Before that slice can perform write actions, provide either a scoped GitHub App installation token or a fine-grained PAT for the private executor.
+The private executor should be responsible for clone/fetch, local diffs, `npm test`, `npm run check`, and repo-native scripts. The Worker should remain the session-protected URL front door and should not grow into a generic shell.
 
 ## Bottom Line
 
-The project is real, public, merged, deployed, and reachable through a working Cloudflare Workers URL. The current live URL is a safe read-only workbench portal suitable for URL-first ChatGPT inspection. The private executor and GitHub write bridge are intentionally not connected yet; that next phase requires a scoped GitHub credential.
+The project is real, public, merged, deployed, and reachable through a working Cloudflare Workers URL. The write-broker slice turns that URL into a safe session-protected GitHub workbench broker after merge and deploy: it can prove GitHub auth and perform constrained issue, comment, branch, file, and PR operations against `fol2/ks2-mastery` without exposing a token or shell. The remaining gap is private executor capability for local checkout work and verification.
