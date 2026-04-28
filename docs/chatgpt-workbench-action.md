@@ -38,6 +38,14 @@ Fallback setup when ChatGPT cannot store or inject a hidden header:
 
 1. James opens the authenticated portal or uses a trusted operator client to create one short-lived passcode.
 
+The simple local command is:
+
+```sh
+npm run passcode -- fol2/ks2-mastery
+```
+
+Use `npm run passcode -- fol2/gptpro-gh-workbench --read-only` for read-only workbench-repository testing, or `npm run passcode -- fol2/ks2-mastery --merge` only when James explicitly wants a merge-capable session.
+
 ```http
 POST /api/action/passcodes
 X-Workbench-Session: <signed-session-token>
