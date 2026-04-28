@@ -28,9 +28,16 @@ The Worker route is a constrained GitHub workbench broker. The default target re
 
 - ChatGPT Pro should use the hosted API connector/action path described in `docs/chatgpt-workbench-action.md`. The first action call is `GET /api/action/readiness`, authenticated with `X-Workbench-Session`, and ChatGPT must stop unless the response returns `classification: "broker_read_ready"`.
 - If ChatGPT cannot store or send a hidden session header, an authenticated operator can create a short-lived one-time passcode with `POST /api/action/passcodes`; ChatGPT exchanges it once at `POST /api/action/exchange` and then carries the returned `actionSession` in JSON bodies.
+- If ChatGPT cannot issue POST requests at all, public repository reads can use `GET /api/get/github/...` without a passcode. Private repository reads can use a repo-bound GET read passcode as `readPasscode=...` without an exchange step.
 - `GET /` renders a compact browser dashboard.
 - `GET /api/action/readiness` runs the action read gate across status, actions, repository, and auth checks.
 - `POST /api/action/readiness`, `POST /api/action/status`, `POST /api/action/actions`, `POST /api/action/github/repo`, `POST /api/action/github/auth`, `POST /api/action/github/prs`, and `POST /api/action/github/issues` expose the same read operations for body-carried `actionSession` clients.
+- `GET /api/get/github/repo?repo=owner/name` reads public repository metadata without a workbench session, or private metadata with a valid GET read passcode.
+- `GET /api/get/github/tree?repo=owner/name&ref=main&path=...` lists public or passcode-authorised repository contents.
+- `GET /api/get/github/file?repo=owner/name&ref=main&path=README.md` returns public or passcode-authorised UTF-8 file content.
+- `GET /api/get/github/prs?repo=owner/name&limit=N` lists open pull requests.
+- `GET /api/get/github/issues?repo=owner/name&limit=N` lists open issues, excluding pull requests where practical.
+- `GET /api/get/github/pr-diff?repo=owner/name&number=N` returns bounded pull request diff text.
 - `GET /api/status` reports service, repository, capability, executor, auth/write, and allowlisted endpoint status.
 - `GET /api/github/auth` reports token-backed identity, selected target repository permission, and broker capabilities without returning the token.
 - `GET /api/github/repo` reads metadata for an allowlisted repository through GitHub's REST API.
@@ -97,6 +104,29 @@ npm run passcode -- fol2/ks2-mastery --max-requests 10 --session-ttl-seconds 600
 npm run passcode -- fol2/ks2-mastery --merge
 ```
 
+For ChatGPT clients that can only perform GET requests, public repositories need no passcode:
+
+```text
+https://gptpro-gh-workbench.eugnel.uk/api/get/github/repo?repo=fol2%2Fks2-mastery
+https://gptpro-gh-workbench.eugnel.uk/api/get/github/tree?repo=fol2%2Fks2-mastery&ref=main
+https://gptpro-gh-workbench.eugnel.uk/api/get/github/file?repo=fol2%2Fks2-mastery&ref=main&path=README.md
+https://gptpro-gh-workbench.eugnel.uk/api/get/github/pr-diff?repo=fol2%2Fks2-mastery&number=1
+```
+
+For a private repository, create a repo-bound GET read passcode. The default tier is `standard`, so omitting `--tier` means 10 GET reads over 600 minutes:
+
+```sh
+npm run get-passcode -- fol2/private-repo
+npm run get-passcode -- fol2/private-repo --tier standard
+npm run get-passcode -- fol2/private-repo --tier single
+```
+
+`standard` allows 10 GET reads for 600 minutes. `single` allows 1 GET read for 10 minutes. ChatGPT appends the returned passcode to the GET URL:
+
+```text
+https://gptpro-gh-workbench.eugnel.uk/api/get/github/file?repo=fol2%2Fprivate-repo&ref=main&path=README.md&readPasscode=<get-read-passcode>
+```
+
 The default probe is read-only. The optional write smoke creates a temporary `agent/...` branch, writes a harmless smoke file, opens a temporary PR, closes that PR, and deletes the branch:
 
 ```sh
@@ -153,7 +183,8 @@ Set `WORKBENCH_DEPLOYMENT_STATUS` to the current deploy state, either as a Worke
 - A valid workbench session token is required before the dashboard or API endpoints return data.
 - Hosted API action calls should authenticate with `X-Workbench-Session`; query-string sessions are retained for manual browser/debug use.
 - If hidden headers are unavailable, use a one-time passcode exchange and send `actionSession` in JSON bodies. Passcodes are single-use; action sessions are short-lived, request-limited, repository-bound, and scope-bound.
-- The GitHub API base is fixed to allowlisted repositories only: `fol2/ks2-mastery` and `fol2/gptpro-gh-workbench`.
+- If POST is unavailable, GET-only reads are available under `/api/get/github/...`. Public repositories need no passcode; private reads require a repo-bound `readPasscode` in the query string. GET read passcodes are fixed-tier, request-limited, time-limited, and cannot write or merge.
+- Session-protected write endpoints remain fixed to allowlisted repositories only: `fol2/ks2-mastery` and `fol2/gptpro-gh-workbench`. GET-only read endpoints accept safe `owner/name` repositories and still never expose arbitrary URL fetches.
 - Write endpoints reject direct `main` file writes, non-`agent/...` branches, workflow file edits, path traversal, oversized bodies, and non-JSON requests.
 - Cleanup endpoints are limited to closing pull requests by number and deleting validated `agent/...` branch refs; they do not expose generic Git reference management.
 - Merge authority is limited to open, non-draft `agent/...` pull requests from an allowlisted repository into that repository's `main`, using squash merge only. Callers must provide `expectedHeadSha` so stale merges are rejected.

@@ -66,6 +66,15 @@ async function createPasscode(env, body = {}) {
   return payload;
 }
 
+async function createGetReadPasscode(env, body = {}) {
+  const response = await jsonPost("/api/action/read-passcodes", body, env);
+  const payload = await response.json();
+
+  assert.equal(response.status, 200);
+  assert.match(payload.passcode, /^WB-[0-9A-F]{4}-[0-9A-F]{4}-[0-9A-F]{4}-[0-9A-F]{4}$/);
+  return payload;
+}
+
 async function exchangePasscode(env, passcode, body = {}) {
   const response = await jsonPostWithoutWorkbenchSession("/api/action/exchange", { passcode, ...body }, env);
   const payload = await response.json();
@@ -222,6 +231,80 @@ test("GitHub read routes can target the allowlisted workbench repository", async
     assert.equal(payload.full_name, "fol2/gptpro-gh-workbench");
     }
   );
+});
+
+test("GET-only public repo route does not require a workbench session or token", async () => {
+  await withMockedFetch((url, init) => {
+    assert.equal(url, "https://api.github.com/repos/fol2/ks2-mastery");
+    assert.equal(init.headers.Authorization, undefined);
+    return Response.json({ full_name: "fol2/ks2-mastery", private: false });
+  }, async (calls) => {
+    const response = await handleRequest(new Request(`${ORIGIN}/api/get/github/repo?repo=fol2%2Fks2-mastery`), WRITE_ENV);
+    const payload = await response.json();
+
+    assert.equal(response.status, 200);
+    assert.equal(payload.full_name, "fol2/ks2-mastery");
+    assert.equal(calls.length, 1);
+  });
+});
+
+test("GET-only tree and file routes expose public repository content", async () => {
+  await withMockedFetch((url, init) => {
+    assert.equal(init.headers.Authorization, undefined);
+
+    if (url === "https://api.github.com/repos/fol2/ks2-mastery/contents?ref=main") {
+      return Response.json([
+        {
+          name: "README.md",
+          path: "README.md",
+          type: "file",
+          size: 12,
+          sha: "abc",
+          html_url: "https://github.com/fol2/ks2-mastery/blob/main/README.md"
+        }
+      ]);
+    }
+
+    assert.equal(url, "https://api.github.com/repos/fol2/ks2-mastery/contents/README.md?ref=main");
+    return Response.json({
+      name: "README.md",
+      path: "README.md",
+      type: "file",
+      size: 12,
+      sha: "abc",
+      content: "SGVsbG8gS1MyCg==",
+      html_url: "https://github.com/fol2/ks2-mastery/blob/main/README.md"
+    });
+  }, async (calls) => {
+    const tree = await handleRequest(new Request(`${ORIGIN}/api/get/github/tree?repo=fol2%2Fks2-mastery&ref=main`), WRITE_ENV);
+    const treePayload = await tree.json();
+    const file = await handleRequest(new Request(`${ORIGIN}/api/get/github/file?repo=fol2%2Fks2-mastery&ref=main&path=README.md`), WRITE_ENV);
+    const filePayload = await file.json();
+
+    assert.equal(tree.status, 200);
+    assert.equal(treePayload.entries[0].path, "README.md");
+    assert.equal(file.status, 200);
+    assert.equal(filePayload.content, "Hello KS2\n");
+    assert.equal(calls.length, 2);
+  });
+});
+
+test("GET-only PR diff route returns bounded diff text", async () => {
+  await withMockedFetch((url, init) => {
+    assert.equal(url, "https://api.github.com/repos/fol2/ks2-mastery/pulls/12");
+    assert.equal(init.headers.Authorization, undefined);
+    assert.equal(init.headers.Accept, "application/vnd.github.v3.diff");
+    return new Response("diff --git a/README.md b/README.md\n");
+  }, async () => {
+    const response = await handleRequest(new Request(`${ORIGIN}/api/get/github/pr-diff?repo=fol2%2Fks2-mastery&number=12`), WRITE_ENV);
+    const payload = await response.json();
+
+    assert.equal(response.status, 200);
+    assert.equal(payload.repository, "fol2/ks2-mastery");
+    assert.equal(payload.number, 12);
+    assert.equal(payload.truncated, false);
+    assert.match(payload.diff, /diff --git/);
+  });
 });
 
 test("GitHub issues route excludes pull requests where practical", async () => {
@@ -451,6 +534,80 @@ test("action passcode creation requires normal session and configured KV", async
   assert.equal(noStorePayload.error, "action_store_missing");
   assert.equal(inconsistentScope.status, 400);
   assert.equal(inconsistentScopePayload.field, "merge");
+});
+
+test("GET read passcode creation requires normal session and configured KV", async () => {
+  const noSession = await jsonPostWithoutWorkbenchSession("/api/action/read-passcodes", {}, actionEnv());
+  const noSessionPayload = await noSession.json();
+  const noStore = await jsonPost("/api/action/read-passcodes", {}, WRITE_ENV);
+  const noStorePayload = await noStore.json();
+  const invalidTier = await jsonPost("/api/action/read-passcodes", { tier: "wide-open" }, actionEnv());
+  const invalidTierPayload = await invalidTier.json();
+  const customLimit = await jsonPost("/api/action/read-passcodes", { maxRequests: 10 }, actionEnv());
+  const customLimitPayload = await customLimit.json();
+
+  assert.equal(noSession.status, 401);
+  assert.equal(noSessionPayload.error, "unauthorised");
+  assert.equal(noStore.status, 503);
+  assert.equal(noStorePayload.error, "action_store_missing");
+  assert.equal(invalidTier.status, 400);
+  assert.equal(invalidTierPayload.field, "tier");
+  assert.equal(customLimit.status, 400);
+  assert.equal(customLimitPayload.field, "tier");
+});
+
+test("GET read passcode defaults to the standard tier", async () => {
+  const env = actionEnv();
+  const payload = await createGetReadPasscode(env, {
+    repo: "fol2/private-repo"
+  });
+
+  assert.equal(payload.scope.repo, "fol2/private-repo");
+  assert.equal(payload.scope.tier, "standard");
+  assert.equal(payload.scope.maxRequests, 10);
+  assert.equal(payload.scope.ttlSeconds, 36000);
+});
+
+test("GET read passcode allows limited private GET reads without exchange", async () => {
+  const env = actionEnv();
+  const passcodePayload = await createGetReadPasscode(env, {
+    repo: "fol2/private-repo",
+    tier: "single"
+  });
+
+  await withMockedFetch((url, init) => {
+    assert.equal(url, "https://api.github.com/repos/fol2/private-repo");
+    assert.equal(init.headers.Authorization, "Bearer github_pat_testsecret");
+    return Response.json({ full_name: "fol2/private-repo", private: true });
+  }, async (calls) => {
+    const first = await handleRequest(new Request(`${ORIGIN}/api/get/github/repo?repo=fol2%2Fprivate-repo&readPasscode=${encodeURIComponent(passcodePayload.passcode)}`), env);
+    const firstPayload = await first.json();
+    const second = await handleRequest(new Request(`${ORIGIN}/api/get/github/repo?repo=fol2%2Fprivate-repo&readPasscode=${encodeURIComponent(passcodePayload.passcode)}`), env);
+    const secondPayload = await second.json();
+
+    assert.equal(first.status, 200);
+    assert.equal(firstPayload.full_name, "fol2/private-repo");
+    assert.equal(second.status, 401);
+    assert.equal(secondPayload.error, "invalid_get_read_passcode");
+    assert.equal(calls.length, 1);
+  });
+});
+
+test("GET read passcode is bound to one repository before GitHub calls", async () => {
+  const env = actionEnv();
+  const passcodePayload = await createGetReadPasscode(env, {
+    repo: "fol2/private-repo"
+  });
+
+  await withMockedFetch(() => {
+    throw new Error("GitHub should not be called for wrong read-passcode repo");
+  }, async () => {
+    const response = await handleRequest(new Request(`${ORIGIN}/api/get/github/repo?repo=fol2%2Fother-private&readPasscode=${encodeURIComponent(passcodePayload.passcode)}`), env);
+    const payload = await response.json();
+
+    assert.equal(response.status, 400);
+    assert.equal(payload.field, "repo");
+  });
 });
 
 test("workbench session can create a one-time action passcode without storing it raw", async () => {

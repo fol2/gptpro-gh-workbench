@@ -21,6 +21,7 @@ ChatGPT does not install packages, run shell commands, clone repositories, expor
 - The workbench session is held by action-side configuration or broker-side secret mapping.
 - Action-to-broker calls should use `X-Workbench-Session: <signed-session-token>`.
 - If the action setup cannot send a hidden header, James can create a short-lived one-time passcode from an authenticated workbench session and ChatGPT can exchange it for an `actionSession` carried in JSON bodies.
+- If ChatGPT cannot make POST requests, it can still use the GET-only read endpoints. Public repositories need no passcode. Private repository reads require a repo-bound GET read passcode in the query string and do not use an exchange step.
 - Query string sessions remain available for manual browser/debug use only.
 - The broker remains the final safety boundary for writes and merges.
 - ZIP or git-bundle repository snapshots are read-only fallbacks for code inspection, not live GitHub authority.
@@ -82,6 +83,33 @@ Content-Type: application/json
 
 The `actionSession` is still constrained: it is short-lived, request-limited, repository-bound, and scope-bound. The default exchanged session lasts 300 minutes and allows up to 500 requests. It does not reveal `GH_TOKEN` or the workbench session.
 
+GET-only setup when ChatGPT cannot POST:
+
+1. Public repositories can be read directly. No passcode is needed.
+
+```http
+GET /api/get/github/repo?repo=fol2%2Fks2-mastery
+GET /api/get/github/tree?repo=fol2%2Fks2-mastery&ref=main
+GET /api/get/github/file?repo=fol2%2Fks2-mastery&ref=main&path=README.md
+GET /api/get/github/pr-diff?repo=fol2%2Fks2-mastery&number=1
+```
+
+2. For a private repository, James creates a repo-bound GET read passcode from an authenticated operator shell. Omitting `--tier` uses the default `standard` tier.
+
+```sh
+npm run get-passcode -- fol2/private-repo
+npm run get-passcode -- fol2/private-repo --tier standard
+npm run get-passcode -- fol2/private-repo --tier single
+```
+
+`standard` allows 10 GET reads for 600 minutes. `single` allows 1 GET read for 10 minutes.
+
+3. ChatGPT appends the passcode to GET read URLs. The passcode is not exchanged and cannot write, comment, create branches, open pull requests, or merge.
+
+```http
+GET /api/get/github/file?repo=fol2%2Fprivate-repo&ref=main&path=README.md&readPasscode=<get-read-passcode>
+```
+
 ## First Action: Readiness
 
 Every ChatGPT session must call readiness before any read/write GitHub action is treated as usable:
@@ -131,6 +159,7 @@ The connector/action should expose these fixed operations. It should not expose 
 |--------|-----------------|-------|
 | Readiness | `GET /api/action/readiness` | First call; must return `broker_read_ready` before writes. |
 | Create passcode | `POST /api/action/passcodes` | Normal workbench session required; returns a short-lived one-time passcode. |
+| Create GET read passcode | `POST /api/action/read-passcodes` | Operator-only helper for private GET-only reads. Uses fixed `standard` or `single` tiers. |
 | Exchange passcode | `POST /api/action/exchange` | Exchanges a one-time passcode for an `actionSession`; no workbench session header needed. |
 | Body readiness | `POST /api/action/readiness` | Same read gate using JSON body `actionSession`. |
 | Body status | `POST /api/action/status` | Broker capability summary using JSON body `actionSession`. |
@@ -145,6 +174,12 @@ The connector/action should expose these fixed operations. It should not expose 
 | Auth | `GET /api/github/auth` | Token-backed viewer and repository permission without token return. |
 | Pull requests | `GET /api/github/prs?limit=N` | Open pull requests with conservative limit cap. |
 | Issues | `GET /api/github/issues?limit=N` | Open issues, excluding pull requests where practical. |
+| GET-only repository | `GET /api/get/github/repo?repo=owner%2Fname` | Public reads need no passcode; private reads use `readPasscode`. |
+| GET-only tree | `GET /api/get/github/tree?repo=owner%2Fname&ref=main&path=...` | Lists repository contents. |
+| GET-only file | `GET /api/get/github/file?repo=owner%2Fname&ref=main&path=README.md` | Returns UTF-8 file content. |
+| GET-only pull requests | `GET /api/get/github/prs?repo=owner%2Fname&limit=N` | Lists open pull requests. |
+| GET-only issues | `GET /api/get/github/issues?repo=owner%2Fname&limit=N` | Lists open issues, excluding pull requests where practical. |
+| GET-only pull request diff | `GET /api/get/github/pr-diff?repo=owner%2Fname&number=N` | Returns bounded diff text. |
 | Create issue | `POST /api/github/issues` | Allowlisted repository only. |
 | Create comment | `POST /api/github/comments` | Issue or pull request number only. |
 | Create branch | `POST /api/github/branches` | `agent/...` branch from `main` only. |
@@ -188,6 +223,17 @@ Recommended ChatGPT test script:
 7. For merge, stop unless James explicitly names the exact PR and current expectedHeadSha.
 ```
 
+Recommended GET-only ChatGPT test script:
+
+```text
+1. For a public repository, call GET /api/get/github/repo?repo=<owner%2Fname>.
+2. Use GET /api/get/github/tree with ref=main to inspect the repository root.
+3. Use GET /api/get/github/file with a repository-relative path to read one file.
+4. If James gives a readPasscode for a private repository, append it as &readPasscode=<get-read-passcode>.
+5. Do not try to exchange the GET read passcode. It is already the limited GET credential.
+6. Do not attempt writes, comments, branches, pull requests, or merges from GET-only mode.
+```
+
 ## Troubleshooting
 
 | Classification or state | Meaning | Response |
@@ -195,6 +241,8 @@ Recommended ChatGPT test script:
 | `missing_session` or `unauthorised_session` | The action did not present a valid workbench session. | Stop and fix action-side session configuration. |
 | `action_store_missing` | The Worker has no `WORKBENCH_ACTION_KV` binding. | Stop and deploy/configure the action-session KV store. |
 | `invalid_action_passcode` | The passcode is invalid, expired, or already used. | Ask James for a fresh one-time passcode; do not retry the same value. |
+| `invalid_get_read_passcode` | The GET read passcode is invalid, expired, for another repository, or already exhausted. | Ask James for a fresh repo-bound GET read passcode; do not retry the same value. |
+| `get_read_passcode_exhausted` | The GET read passcode has no requests remaining. | Ask James for a fresh passcode if more private GET reads are needed. |
 | `action_session_required` | The JSON body did not include `actionSession`. | Stop and exchange a one-time passcode first. |
 | `invalid_action_session` | The `actionSession` is expired, malformed, or not recognised. | Stop and exchange a fresh one-time passcode. |
 | `action_session_scope_denied` | The action session does not grant the requested read/write/merge scope. | Stop; do not ask for broader authority unless James explicitly wants that operation. |

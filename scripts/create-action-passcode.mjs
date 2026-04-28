@@ -10,10 +10,14 @@ const DEFAULT_TOKEN_FILE = path.join(homedir(), ".config", "gptpro-gh-workbench"
 const DEFAULT_TTL_SECONDS = 600;
 const DEFAULT_SESSION_TTL_SECONDS = 18_000;
 const DEFAULT_MAX_REQUESTS = 500;
+const DEFAULT_GET_READ_TIER = "standard";
+const GET_READ_TIERS = new Set(["standard", "single"]);
 
 const USAGE = `Usage:
   npm run passcode -- <repo>
   npm run passcode -- fol2/ks2-mastery
+  npm run get-passcode -- fol2/private-repo --tier standard
+  npm run get-passcode -- fol2/private-repo --tier single
   npm run passcode -- fol2/gptpro-gh-workbench --read-only
   npm run passcode -- fol2/ks2-mastery --merge --max-requests 10
 
@@ -24,6 +28,8 @@ Options:
   --ttl-seconds <seconds>         One-time passcode lifetime. Defaults to ${DEFAULT_TTL_SECONDS}.
   --session-ttl-seconds <seconds> Action session lifetime after exchange. Defaults to ${DEFAULT_SESSION_TTL_SECONDS} (300 minutes).
   --max-requests <count>          Action session request limit. Defaults to ${DEFAULT_MAX_REQUESTS}.
+  --get-only                      Create a GET read passcode. No exchange step; use as ?readPasscode=...
+  --tier <standard|single>        GET read tier. Defaults to standard: 10 reads/600 minutes. single is 1 read/10 minutes.
   --read-only                     Create a read-only action session.
   --write                         Create a write-capable action session. This is the default.
   --merge                         Also grant merge scope. Use only for an explicit merge task.
@@ -38,7 +44,11 @@ export function parseArgs(argv) {
     tokenFile: DEFAULT_TOKEN_FILE,
     ttlSeconds: DEFAULT_TTL_SECONDS,
     sessionTtlSeconds: DEFAULT_SESSION_TTL_SECONDS,
-    maxRequests: DEFAULT_MAX_REQUESTS,
+    maxRequests: null,
+    customTtlSeconds: false,
+    customMaxRequests: false,
+    getOnly: false,
+    tier: null,
     write: true,
     merge: false,
     json: false,
@@ -62,6 +72,18 @@ export function parseArgs(argv) {
     if (arg === "--read-only") {
       options.write = false;
       options.merge = false;
+      continue;
+    }
+
+    if (arg === "--get-only") {
+      options.getOnly = true;
+      options.write = false;
+      options.merge = false;
+      continue;
+    }
+
+    if (arg === "--tier") {
+      options.tier = requiredValue(args, arg);
       continue;
     }
 
@@ -93,6 +115,7 @@ export function parseArgs(argv) {
 
     if (arg === "--ttl-seconds") {
       options.ttlSeconds = parsePositiveInteger(requiredValue(args, arg), arg);
+      options.customTtlSeconds = true;
       continue;
     }
 
@@ -103,6 +126,7 @@ export function parseArgs(argv) {
 
     if (arg === "--max-requests") {
       options.maxRequests = parsePositiveInteger(requiredValue(args, arg), arg);
+      options.customMaxRequests = true;
       continue;
     }
 
@@ -117,26 +141,50 @@ export function parseArgs(argv) {
   }
 
   options.repo ||= DEFAULT_REPO;
+  if (options.getOnly) {
+    if (options.customMaxRequests || options.customTtlSeconds) {
+      throw new Error("GET read passcodes use --tier standard or --tier single instead of --max-requests or --ttl-seconds.");
+    }
+    options.tier ||= DEFAULT_GET_READ_TIER;
+    if (!GET_READ_TIERS.has(options.tier)) {
+      throw new Error("--tier must be standard or single.");
+    }
+  } else {
+    if (options.tier) {
+      throw new Error("--tier is only available with --get-only.");
+    }
+    options.maxRequests ??= DEFAULT_MAX_REQUESTS;
+  }
+  delete options.customTtlSeconds;
+  delete options.customMaxRequests;
   options.baseUrl = options.baseUrl.replace(/\/+$/, "");
   return options;
 }
 
 export async function createActionPasscode(options, fetchImpl = fetch) {
   const token = await readSessionToken(options.tokenFile);
-  const response = await fetchImpl(`${options.baseUrl}/api/action/passcodes`, {
-    method: "POST",
-    headers: {
-      "Content-Type": "application/json",
-      "X-Workbench-Session": token
-    },
-    body: JSON.stringify({
+  const endpoint = options.getOnly ? "/api/action/read-passcodes" : "/api/action/passcodes";
+  const requestBody = options.getOnly
+    ? {
+      repo: options.repo,
+      tier: options.tier
+    }
+    : {
       repo: options.repo,
       write: options.write,
       merge: options.merge,
       ttlSeconds: options.ttlSeconds,
       sessionTtlSeconds: options.sessionTtlSeconds,
       maxRequests: options.maxRequests
-    })
+    };
+
+  const response = await fetchImpl(`${options.baseUrl}${endpoint}`, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      "X-Workbench-Session": token
+    },
+    body: JSON.stringify(requestBody)
   });
 
   const payload = await response.json().catch(() => null);
