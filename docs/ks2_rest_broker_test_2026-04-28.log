@@ -1,9 +1,44 @@
-[2026-04-28] KS2 REST broker runtime probe summary
+# KS2 REST broker test
+date_utc=2026-04-28T17:21:54Z
 
-public portal unauthenticated check: 401 Unauthorized
-shell dns check for gptpro-gh-workbench.eugnel.uk: failed in the tested runtime
-authenticated broker session: not available in the tested chat
-post-capable rest connector: not available in the tested chat
-write smoke: not attempted from this runtime
+## Environment command availability
+curl=/usr/local/bin/curl
+jq=/usr/bin/jq
+git=/usr/bin/git
+gh=
 
-redaction note: raw session URLs, cookies, GitHub tokens, and bearer credentials are intentionally omitted from this log.
+## portal root unauth
+curl: (6) Could not resolve host: gptpro-gh-workbench.eugnel.uk
+http_code=000
+remote_ip=
+ssl_verify=0
+--- headers ---
+--- body first 1000 ---
+
+
+## api status unauth
+
+## api status unauth retry with GNU timeout
+* Uses proxy env variable no_proxy == 'localhost,127.0.0.1'
+* Could not resolve host: gptpro-gh-workbench.eugnel.uk
+* shutting down connection #0
+curl: (6) Could not resolve host: gptpro-gh-workbench.eugnel.uk
+http_code=000
+remote_ip=
+ssl_verify=0
+curl_exit=6
+--- headers ---
+--- body first 1000 ---
+
+## api github repo unauth retry with GNU timeout
+* Uses proxy env variable no_proxy == 'localhost,127.0.0.1'
+* Could not resolve host: gptpro-gh-workbench.eugnel.uk
+* shutting down connection #0
+curl: (6) Could not resolve host: gptpro-gh-workbench.eugnel.uk
+http_code=000
+remote_ip=
+ssl_verify=0
+
+## DNS probe via getent/nslookup/python
+getent_hosts=getent_exit=2
+python_getaddrinfo=gaierror:[Errno -3] Temporary failure in name resolution
