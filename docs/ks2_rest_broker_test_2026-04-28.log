@@ -1,0 +1,9 @@
+[2026-04-28] KS2 REST broker runtime probe summary
+
+public portal unauthenticated check: 401 Unauthorized
+shell dns check for gptpro-gh-workbench.eugnel.uk: failed in the tested runtime
+authenticated broker session: not available in the tested chat
+post-capable rest connector: not available in the tested chat
+write smoke: not attempted from this runtime
+
+redaction note: raw session URLs, cookies, GitHub tokens, and bearer credentials are intentionally omitted from this log.

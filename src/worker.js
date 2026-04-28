@@ -24,8 +24,10 @@ const WRITE_ENDPOINTS = [
   "POST /api/github/issues",
   "POST /api/github/comments",
   "POST /api/github/branches",
+  "POST /api/github/branches/delete",
   "POST /api/github/files",
-  "POST /api/github/pulls"
+  "POST /api/github/pulls",
+  "POST /api/github/pulls/close"
 ];
 
 function buildActions(env = {}) {
@@ -55,7 +57,7 @@ function buildActions(env = {}) {
   },
   {
     id: "github.write",
-    label: "Create branches, comments, issues, or pull requests",
+    label: "Create branches, comments, issues, pull requests, or smoke cleanup",
     status: writeEnabled ? "enabled" : "disabled",
     method: "POST",
     endpoint: "/api/github/*",
@@ -290,8 +292,10 @@ async function buildGitHubAuthStatus(env) {
         create_issue: true,
         create_issue_or_pr_comment: true,
         create_agent_branch: true,
+        delete_agent_branch: true,
         put_file_on_agent_branch: true,
         create_pr_from_agent_branch: true,
+        close_pull_request: true,
         direct_main_write: false,
         merge: false,
         workflow_edit: false,
@@ -328,12 +332,20 @@ async function handleGitHubWriteRequest(request, env, pathname) {
     return githubResponse(await createAgentBranch(body, env));
   }
 
+  if (pathname === "/api/github/branches/delete") {
+    return githubResponse(await deleteAgentBranch(body, env));
+  }
+
   if (pathname === "/api/github/files") {
     return githubResponse(await putRepositoryFile(body, env));
   }
 
   if (pathname === "/api/github/pulls") {
     return githubResponse(await createPullRequest(body, env));
+  }
+
+  if (pathname === "/api/github/pulls/close") {
+    return githubResponse(await closePullRequest(body, env));
   }
 
   return jsonResponse({
@@ -505,6 +517,39 @@ async function createPullRequest(body, env) {
   });
 }
 
+async function closePullRequest(body, env) {
+  const number = positiveInteger(body.number, "number");
+  if (!number.ok) return number;
+
+  return fetchGitHubJson(`/repos/${TARGET_REPO}/pulls/${number.value}`, env, {
+    method: "PATCH",
+    body: {
+      state: "closed"
+    }
+  });
+}
+
+async function deleteAgentBranch(body, env) {
+  const branch = validateAgentBranch(body.branch);
+  if (!branch.ok) return branch;
+
+  const refPath = `heads/${encodeRepoPath(branch.value)}`;
+  const deleted = await fetchGitHubJson(`/repos/${TARGET_REPO}/git/refs/${refPath}`, env, {
+    method: "DELETE"
+  });
+  if (!deleted.ok) return deleted;
+
+  return {
+    ok: true,
+    status: 200,
+    payload: {
+      deleted: true,
+      branch: branch.value,
+      ref: `refs/heads/${branch.value}`
+    }
+  };
+}
+
 async function fetchGitHubJson(path, env = {}, options = {}) {
   try {
     const headers = {
@@ -571,7 +616,7 @@ function permissionLabel(permissions = {}) {
 }
 
 function positiveInteger(value, field) {
-  const parsed = Number.parseInt(value, 10);
+  const parsed = Number(value);
   if (!Number.isSafeInteger(parsed) || parsed < 1) {
     return validationError(field, `${field} must be a positive integer.`);
   }
@@ -818,8 +863,10 @@ function isSafeApiPath(pathname) {
     "/api/github/issues",
     "/api/github/comments",
     "/api/github/branches",
+    "/api/github/branches/delete",
     "/api/github/files",
-    "/api/github/pulls"
+    "/api/github/pulls",
+    "/api/github/pulls/close"
   ].includes(pathname);
 }
 
@@ -828,8 +875,10 @@ function isWriteApiPath(pathname) {
     "/api/github/issues",
     "/api/github/comments",
     "/api/github/branches",
+    "/api/github/branches/delete",
     "/api/github/files",
-    "/api/github/pulls"
+    "/api/github/pulls",
+    "/api/github/pulls/close"
   ].includes(pathname);
 }
 

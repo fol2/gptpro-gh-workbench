@@ -8,9 +8,14 @@ The immediate target use case is KS2 Mastery (`fol2/ks2-mastery`): ChatGPT shoul
 
 - `src/worker.js` - session-protected Cloudflare Worker portal and narrow GitHub broker.
 - `tests/worker.test.js` - Node built-in test coverage for routing, session/auth boundaries, GitHub reads, and allowlisted write safeguards.
+- `tests/workbench_docs.test.js` - documentation secret-scan and capability wording checks.
+- `tests/broker_probe_test.py` - Python unit coverage for the reusable broker probe client.
 - `wrangler.jsonc` - Cloudflare Worker configuration for `gptpro-gh-workbench`.
+- `docs/ks2_workbench_broker_probe.py` - dependency-light probe client for signed workbench session URLs.
+- `docs/ks2-rest-broker-test-report-2026-04-28.md` - runtime test report and client-path blocker summary.
 - `docs/plan/ks2-github-workbench-establishment-plan.md` - original establishment brief.
 - `docs/plans/2026-04-28-001-feat-ks2-github-workbench-plan.md` - implementation plan for the URL-first portal/workbench direction.
+- `docs/plans/2026-04-28-002-feat-operable-broker-client-plan.md` - implementation plan for the operable client path and cleanup slice.
 - `@/2026-04-28-ks2-github-workbench-completion-report.md` - completion report for the planning artefact and recommended next implementation slice.
 - `@/2026-04-28-gptpro-gh-workbench-deployment-report.md` - implementation, review, merge, and live-smoke report for the portal and write-broker slices.
 
@@ -30,8 +35,10 @@ The Worker route is a constrained GitHub workbench broker:
 - `POST /api/github/issues` creates an issue in `fol2/ks2-mastery`.
 - `POST /api/github/comments` creates an issue or pull request comment by issue/PR number.
 - `POST /api/github/branches` creates an `agent/...` branch from `main`.
+- `POST /api/github/branches/delete` deletes a validated `agent/...` branch ref for smoke cleanup.
 - `POST /api/github/files` creates or updates one repository file on an `agent/...` branch.
 - `POST /api/github/pulls` creates a pull request from an `agent/...` branch into `main`.
+- `POST /api/github/pulls/close` closes a pull request by number for smoke cleanup.
 
 The private executor is still not connected: the Worker does not run shell commands, local tests, arbitrary Git operations, or repo-native scripts. GitHub writes are limited to fixed REST API operations against `fol2/ks2-mastery` using the Worker secret `GH_TOKEN`.
 
@@ -56,6 +63,21 @@ npm test
 npm run check
 git diff --check
 ```
+
+Probe the live broker from a runtime that has a signed workbench session URL:
+
+```sh
+export KS2_WORKBENCH_SESSION_URL='<signed workbench session URL>'
+python3 docs/ks2_workbench_broker_probe.py
+```
+
+The default probe is read-only. The optional write smoke creates a temporary `agent/...` branch, writes a harmless smoke file, opens a temporary PR, closes that PR, and deletes the branch:
+
+```sh
+python3 docs/ks2_workbench_broker_probe.py --write-smoke
+```
+
+Do not provide or export a GitHub token to the probe runtime. The Worker already holds GitHub authority through its own secret.
 
 ## Deployment
 
@@ -88,5 +110,6 @@ Set `WORKBENCH_DEPLOYMENT_STATUS` to the current deploy state, either as a Worke
 - A valid workbench session token is required before the dashboard or API endpoints return data.
 - The GitHub API base is fixed to `https://api.github.com/repos/fol2/ks2-mastery`.
 - Write endpoints reject direct `main` writes, non-`agent/...` branches, workflow file edits, path traversal, oversized bodies, and non-JSON requests.
+- Cleanup endpoints are limited to closing pull requests by number and deleting validated `agent/...` branch refs; they do not merge PRs or expose generic Git reference management.
 - There is no arbitrary URL fetch, generic proxy, shell execution, executor command execution, merge endpoint, admin endpoint, secret endpoint, or workflow endpoint.
 - API responses include conservative security headers and CORS without credentials.
